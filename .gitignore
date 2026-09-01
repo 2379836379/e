@@ -1,0 +1,7 @@
+tests/out/
+
+*.o
+build
+
+*.data
+*.log
