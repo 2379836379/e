@@ -1,0 +1,128 @@
+\chapter{引言}
+\label{chap:intro}
+
+集合通信决定了数据并行、张量并行和 ZeRO/FSDP~\cite{zero,fsdp} 等训练策略的
+通信开销。NCCL~\cite{nccl} 为常见原语提供拓扑感知实现；MSCCL~\cite{msccl}、
+HiCCL~\cite{hiccl} 和 TACCL~\cite{taccl} 进一步开放细粒度的发送、接收、
+规约和拷贝动作，让端侧运行时针对拓扑和训练策略生成 collective 计划。计划
+最终仍交给点对点传输执行：路径、拥塞与可靠性沿每条连接独立演化，同一
+packet offset 的输入关系和整组完成条件留在运行时手中，网络看到的只是一批
+彼此独立的连接流量。
+
+点对点执行直接决定链路上要走多少字节。以 ring AllReduce 为例，
+reduce-scatter 和 all-gather 使每个 rank 共发送 $2(N-1)M/N$ 字节；$N=16$
+时已接近 $1.9M$，仅主机出口的串行化就把 logical goodput 上界压到
+53.3~Gbps（\cref{ssec:p2p-ccl}）。在网聚合让交换机或网络侧加速器沿路径
+合并规约输入~\cite{switchml,netreduce,atp}：每个 rank 的线量回到 $M$
+字节，共享链路只承载聚合后的数据流，吞吐上界从 $N/(2(N-1))$ 倍线速回到
+线速本身。
+
+这份理论收益却始终没有走出单厂商垂直栈。SHARP~\cite{sharp} 绑定
+InfiniBand 交换机与专用控制面；在开放以太网数据中心里，至今没有出现一个
+像 RoCE 之于 RDMA 那样可共享、多租户的在网聚合传输。障碍可以归结为两个
+资源边界。
+
+第一，昂贵的专用聚合状态不等于活跃任务可用的容量。现有系统把 accumulator、
+贡献计数和恢复结果放在可编程交换机 SRAM、硬件 reduction tree 或路径上的
+FPGA 中~\cite{switchml,atp,sharp,netreduce}。增加 SRAM 或旁挂 FPGA 扩大的
+只是物理容量：地址若仍按 job、通信组或连接预留，静默上下文占住的容量就
+服务不了活跃任务；数据面哈希允许跨任务共享，却可能在其它地址空闲时发生
+碰撞；控制面全局规划则受分配粒度与更新周期限制~\cite{airp}。关键因而不在
+再堆多少聚合内存，而在全部活跃任务能否使用这些地址、地址何时可以安全复用
+——按单条连接 BDP 整定窗口只回答带宽问题，给不出共享 allocator 的安全
+深度（\cref{ssec:inc-survey}）。
+
+第二，现有方案都要在点对点连接之上另设一层组内协调，因为带宽不一致出现在
+两个层面。候选树之间剩余容量不同时，按报文标识固定的 ECMP 或 packet
+spraying~\cite{ecmp,themis} 无法把后续 offset 转向空闲树；CONGA 和
+LetFlow 等自适应方案~\cite{conga,letflow} 能迁移单个 unicast packet 或
+flowlet，却决定不了同一 offset 的整组输入该用哪棵聚合树。同一棵树内的
+输入分支速率不同时，聚合器必须保留部分结果，直到最慢分支补齐。SwitchML、
+ATP 和 EPIC 分别通过 aggregation pool、参数服务器和交换机传输端点约束
+这种偏斜~\cite{switchml,atp,epic}；它们能够响应慢分支，但也把组内推进
+绑定到了相应的状态或端点上，而维持这层协调本身还要消耗聚合状态之外的
+交换机逻辑、存储或专用服务器（\cref{ssec:group-consistency}）。
+
+上述两个层面对应传输层的两项义务，本文分别称之为\emph{聚合上下文一致性}
+与\emph{整组进度可见性}：前者要求 credit 显式绑定 offset、树和逐级位置，
+避免不同 requester 把同一份许可导出为不同 packet；后者要求发送控制、恢复
+和后续选树只消费整组完成或组级拥塞信号。第一个边界的答案则是一条独立的
+推进界：配置达到端口上界后，共享状态的容量安全有了保证，在线选树无需把
+``剩余 slot''当作第三个竞争资源。
+
+如同传输层管理带宽——决定谁、在何时、以什么速率向哪条路径注入——在网
+聚合引入了一种新的网络资源，却没有引入管理它的传输对象。\sysname 的回答
+是一个原生多播、完全带内的传输层。\sysname 把一个 responder 与一组
+requester 之间稳定的 request/response 关系定义为\emph{多播-聚合流}：一条
+流依次传输多个 message，每个 message 覆盖一段连续数据。responder 为每个
+packet offset 组播一份 credit，credit 指定该 offset 使用的聚合树
+（subchannel）；下行副本沿各自分支推进各级 allocator、取得位置栈，
+requester 凭 credit 发送本分支输入。消费同一份 credit 的 requester 继承
+同一 Credit Context——credit 显式携带该绑定，整组一致性由此成为协议
+构造，而非端侧推断。六种集合通信原语只改变 channel 集合与 payload 方向；
+聚合参数全部随包带内到达，数据面只剩直接索引的计数与累加。这一简化正是
+部署性的来源：聚合器不再需要可编程交换机，而是旁挂商用交换机的即插即用
+加速器——不查表、不装通信组或转发状态、无逐组控制面配置，并按完整
+8-KiB payload 执行 FP32 规约。
+
+\parab{整组完成引导后续 subchannel.}
+一个 subchannel 对应一棵聚合树。responder 为每棵树分别维护窗口和 pacing
+状态，并从当前允许发放的 subchannel 中为下一个 packet offset 选树。整组
+完成事件更新所选树的状态；gate 关闭期间，该树拿不到新的 offset。
+
+\parab{可定容的共享聚合状态.}
+normal credit 沿下行路径为 Credit Context 取得逐级 slot；request 沿上行
+路径带回这些位置并通过 owner 校验。每台交换机上的所有 job 共用一个循环
+allocator；一次 allocation 从绑定 slot 到本级聚合完成期间 allocator 推进
+了多少次，决定所需深度。\Cref{sssec:slot-bound} 给出最大推进深度的精确
+容量条件，并用 allocation 到达包络推导部署上界；满足容量条件时，循环映射
+可以安全使用全部已配置地址。
+
+\parab{整组完成控制发送与恢复.}
+responder 以速率门 $r_s$ 和窗口门 $W_s$ 约束每个 subchannel 的 credit
+发放。一份 normal credit 对应的整组输入首次完成时，responder 获得覆盖
+最慢分支的样本，所选端侧拥塞控制算法据此更新后续发送许可；基于速率和
+基于窗口的控制律共用这一 credit 发放与整组完成接口。owner mismatch 或
+超时使对应 Credit Context 转入整组 repair；requester 的 normal 单注入与
+responder 的 repair 位图共同保证单次提交。六种集合通信原语通过 channel
+集合和 request/response 的用户 payload 方向配置，选树、聚合、发送控制和
+恢复沿用同一组规则（\cref{tab:collective-mapping}）。
+
+本文贡献如下：
+
+\begin{itemize}
+    \item \textbf{共享聚合器内存的精确定容界。}
+    我们以复用保护区间内的最大 advance 数定义精确最小深度 $D_e$，并证明
+    $A_e\geq D_e$ 是 normal path 不提前复用的充要条件；推进包络、端口
+    速率和安全覆盖时延进一步给出部署闭式界。定容针对全部 job 合并后的
+    共享分配序列，不随 job 或 rank 数附加静态乘数，为聚合器内存的配置
+    提供有原则的依据。
+
+    \item \textbf{面向整组 offset 的多播原生传输对象。}
+    多播-聚合流为 responder、requester group 和连续 message 定义稳定的
+    传输关系；一份组播 credit 逐 offset 绑定 subchannel、逐级聚合位置与
+    发送许可，使聚合上下文一致性来自协议构造而不是端侧推断。每条预装
+    subchannel 独立维护 rate/window gate，整组完成样本驱动 gate，拥塞或
+    故障的树自然少获得后续 offset，自适应选路因此在在网 fan-in 下保持
+    Credit Context 唯一性（\cref{ssec:response-credit}）；选择规则只读
+    完成反馈与 gate 状态，与聚合语义和状态容量解耦。Normal credit 在
+    沿途各级推进 allocator 并把取得的位置压栈返回，request 按栈定位聚合
+    状态；$A_e=D_e$ 时该机制以最小安全深度避免提前复用，并使 100\% 的
+    已配置 slot 地址成为无冲突容量，不受哈希冲突或 per-job 分区限制。
+    六种 collective 原语共用同一数据通路，仅改变 channel 集合与 payload
+    方向。
+
+    \item \textbf{原型实现与即插即用的聚合加速器。}
+    我们实现 DPDK 主机运行时和面向 Alveo V80 的四端口聚合 RTL kernel。
+    聚合语义由端点与带内字段承载，数据面无需通信组、成员或转发表，只剩
+    计数与累加；聚合器因而不依赖可编程交换机，以旁挂商用交换机的即插即用
+    加速器部署，支持完整 8-KiB payload 的 FP32 规约，无逐组控制面配置。
+    包级仿真覆盖六种 collective 原语和四种端侧拥塞控制算法；110 次状态实验均满足
+    相应的循环复用界。在固定 6.4-Tbps spine 和按实测 p99 operating point
+    配置的 42-MiB 状态上，我们把配置人口从 16 增至 512，并令约 75\% 的
+    job 持续通信。相对各点由拓扑确定的 per-job service budget，\sysname
+    保持 97.42\%--97.98\%；静态分区的 SwitchML-like 在分区成为瓶颈后为
+    69.99\%--75.03\%，ATP-like 则随哈希冲突增加从 97.59\% 降至 40.50\%。
+    % TODO(testbed-v80-final): 在最终 V80 数据封存后补四 rank FP32 吞吐、
+    % 最小 poller core 数、ATP/SwitchML 对比和 accelerator 资源摘要。
+\end{itemize}

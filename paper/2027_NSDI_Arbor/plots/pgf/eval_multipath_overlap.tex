@@ -1,0 +1,100 @@
+\begin{tikzpicture}
+\begin{axis}[
+  arbor axis,arbor panel,
+  width=0.72\textwidth,height=0.29\textwidth,
+  title={(a) Candidate-set overlap},
+  ybar,bar width=7pt,
+  xmin=-0.55,xmax=2.55,
+  ymin=0,ymax=108,
+  xtick={0,1,2},
+  xticklabels={Disjoint,Avoidable,Unavoidable},
+  xticklabel style={font=\scriptsize},
+  ytick={0,20,40,60,80,100},
+  xlabel={Overlap class},
+  ylabel={Capacity utilization (\%)},
+  legend style={font=\tiny,at={(0.5,1.02)},anchor=south,legend columns=3,
+    /tikz/every even column/.append style={column sep=3pt}},
+]
+\addplot[fill=ArborLightGray,draw=ArborGray,bar shift=-8pt]
+  table[col sep=comma,x=scenarioIndex,
+    y expr={100*\thisrow{uniform}/\thisrow{feasible}}]
+  {plots/data/pgf/g3-online-overlap.csv};
+\addlegendentry{Uniform}
+\addplot[fill=ArborOrange,draw=ArborOrange,bar shift=0pt]
+  table[col sep=comma,x=scenarioIndex,
+    y expr={100*\thisrow{beststatic}/\thisrow{feasible}}]
+  {plots/data/pgf/g3-online-overlap.csv};
+\addlegendentry{Calibrated static}
+\addplot[fill=ArborBlue,draw=ArborBlue,bar shift=8pt]
+  table[col sep=comma,x=scenarioIndex,
+    y expr={100*\thisrow{dynamic}/\thisrow{feasible}}]
+  {plots/data/pgf/g3-online-overlap.csv};
+\addlegendentry{Dynamic}
+\addplot[sharp plot,black,thin,densely dotted,mark=none,forget plot]
+  coordinates {(-0.55,100) (2.55,100)};
+\end{axis}
+\end{tikzpicture}
+
+\vspace{0.6em}
+
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=0.075\textwidth},
+  arbor axis,arbor panel,
+  width=0.46\textwidth,height=0.29\textwidth,
+  xmin=25.6,xmax=204.8,
+  xtick={32,83.2,134.4,185.6},
+]
+\nextgroupplot[
+  title={(b) $B$ shifts across roots},
+  ymin=0,ymax=205,
+  ytick={0,100,200},
+  xlabel={Time (ms)},
+  ylabel={$B$ issued (Gbps)},
+  legend style={font=\tiny,at={(0.5,1.01)},anchor=south,legend columns=2,
+    /tikz/every even column/.append style={column sep=4pt}},
+]
+\path[fill=ArborBlue!5] (axis cs:38.4,0) rectangle (axis cs:51.2,205);
+\path[fill=ArborBlue!5] (axis cs:64.0,0) rectangle (axis cs:76.8,205);
+\path[fill=ArborBlue!5] (axis cs:89.6,0) rectangle (axis cs:102.4,205);
+\path[fill=ArborBlue!5] (axis cs:115.2,0) rectangle (axis cs:128.0,205);
+\path[fill=ArborBlue!5] (axis cs:140.8,0) rectangle (axis cs:153.6,205);
+\path[fill=ArborBlue!5] (axis cs:166.4,0) rectangle (axis cs:179.2,205);
+\path[fill=ArborBlue!5] (axis cs:192.0,0) rectangle (axis cs:204.8,205);
+\addplot[ArborOrange,thick,dashed,mark=square*,mark size=1.6pt]
+  table[col sep=comma,x=timeMs,y=dynamicBRoot0IssuedGbps]
+  {plots/data/pgf/g3-indirect-c3-timeline-v3.csv};
+\addlegendentry{B via root 0}
+\addplot[ArborBlue,thick,mark=*,mark size=1.5pt]
+  table[col sep=comma,x=timeMs,y=dynamicBRoot1IssuedGbps]
+  {plots/data/pgf/g3-indirect-c3-timeline-v3.csv};
+\addlegendentry{B via root 1}
+\node[font=\tiny,anchor=north] at (axis cs:32,198) {$C$ communicates};
+\node[font=\tiny,anchor=north] at (axis cs:44.8,198) {$C$ computes};
+
+\nextgroupplot[
+  title={(c) $A$ reuses released capacity},
+  ymin=100,ymax=185,
+  ytick={100,140,180},
+  xlabel={Time (ms)},
+  ylabel={$A$ goodput (Gbps)},
+  legend style={font=\tiny,at={(0.5,0.02)},anchor=south,legend columns=2,
+    /tikz/every even column/.append style={column sep=4pt}},
+]
+\path[fill=ArborBlue!5] (axis cs:38.4,100) rectangle (axis cs:51.2,185);
+\path[fill=ArborBlue!5] (axis cs:64.0,100) rectangle (axis cs:76.8,185);
+\path[fill=ArborBlue!5] (axis cs:89.6,100) rectangle (axis cs:102.4,185);
+\path[fill=ArborBlue!5] (axis cs:115.2,100) rectangle (axis cs:128.0,185);
+\path[fill=ArborBlue!5] (axis cs:140.8,100) rectangle (axis cs:153.6,185);
+\path[fill=ArborBlue!5] (axis cs:166.4,100) rectangle (axis cs:179.2,185);
+\path[fill=ArborBlue!5] (axis cs:192.0,100) rectangle (axis cs:204.8,185);
+\addplot[ArborGray,thick,dashed,mark=triangle*,mark size=1.6pt]
+  table[col sep=comma,x=timeMs,y=uniformACompletedGbps]
+  {plots/data/pgf/g3-indirect-c3-timeline-v3.csv};
+\addlegendentry{Fixed 1:1}
+\addplot[ArborBlue,thick,mark=*,mark size=1.5pt]
+  table[col sep=comma,x=timeMs,y=dynamicACompletedGbps]
+  {plots/data/pgf/g3-indirect-c3-timeline-v3.csv};
+\addlegendentry{Dynamic}
+\end{groupplot}
+\end{tikzpicture}

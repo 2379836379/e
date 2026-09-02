@@ -16,7 +16,7 @@ TEST_SCRIPT_DIR = $(TEST_ROOT)/scripts
 TEST_DATA_DIR = $(TEST_ROOT)/data/current
 TEST_OUT_DIR = $(TEST_ROOT)/out
 
-.PHONY: all clean setup_env setup_topo clean_topo kill test_allreduce test
+.PHONY: all clean setup_env setup_topo clean_topo kill test_allreduce test test_allreduce_loss
 
 all: $(TARGET)
 
@@ -54,5 +54,8 @@ endef
 
 test_allreduce: $(TARGET)
 	$(run-allreduce)
+
+test_allreduce_loss: $(TARGET)
+	bash $(TEST_SCRIPT_DIR)/run_allreduce_loss_test.sh
 
 test: test_allreduce

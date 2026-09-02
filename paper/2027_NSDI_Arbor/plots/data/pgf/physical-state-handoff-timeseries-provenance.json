@@ -1,0 +1,8 @@
+{
+  "generated_from": "/home/ruizhe/Workspace/arbor/testbed/.worktrees/v80-correctness/experiments/results/v80-three-system-equal-resource-handoff-timeseries-a128-20260829-r2/survivor-timeseries.csv",
+  "installed_csv": "physical-state-handoff-timeseries.csv",
+  "installed_csv_sha256": "0ba5f559f4bcd20abeba15f8751ce503800c22b9543be412b75d429109906142",
+  "schema": "arbor.paper.physical-state-handoff-timeseries.v1",
+  "source_summary": "/home/ruizhe/Workspace/arbor/testbed/.worktrees/v80-correctness/experiments/results/v80-three-system-equal-resource-handoff-timeseries-a128-20260829-r2/summary.json",
+  "source_summary_sha256": "1647b473664a97b746f02323d2b1b7ae7e485b579cc3f2c50fa45f8dc3a3ed70"
+}

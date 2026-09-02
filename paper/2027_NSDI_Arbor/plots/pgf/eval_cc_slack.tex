@@ -1,0 +1,48 @@
+\begin{tikzpicture}
+\begin{axis}[
+  arbor axis,arbor panel,axis on top,
+  width=0.76\textwidth,height=0.34\textwidth,
+  xmin=-0.6,xmax=24,ymin=-0.8,ymax=24,
+  xtick={0,5,10,15,20},ytick={0,5,10,15,20},
+  xlabel={Queueing delay added on $E$, $q_E$ ($\mu\mathrm{s}$)},
+  ylabel={Delay visible in group completion ($\mu\mathrm{s}$)},
+]
+\path[fill=ArborSky,fill opacity=0.10,draw=none]
+  (axis cs:0,-0.8) rectangle (axis cs:12.664,24);
+
+% Parameter-free predictions frozen before the formal pulse runs.
+\addplot[ArborBlue,thick,dashed,mark=none]
+  coordinates {(0,0) (12.664,0) (24,11.336)};
+\addplot[ArborOrange,thick,dash dot,mark=none]
+  coordinates {(0,0) (24,24)};
+
+% Measured medians from the two paired responder placements.
+\addplot[ArborBlue,thick,only marks,mark=*,mark size=2.4pt,
+  restrict expr to domain={\thisrow{critical}}{0:0}]
+  table[col sep=comma,x=qUs,y=observedUs]
+  {plots/data/pgf/cc_slack.csv};
+\addplot[ArborOrange,thick,only marks,mark=square*,mark size=2.4pt,
+  restrict expr to domain={\thisrow{critical}}{1:1}]
+  table[col sep=comma,x=qUs,y=observedUs]
+  {plots/data/pgf/cc_slack.csv};
+
+\draw[ArborGray,densely dotted,line width=0.8pt]
+  (axis cs:12.664,-0.8)--(axis cs:12.664,24);
+\node[font=\scriptsize,text=ArborGray,anchor=north east]
+  at (axis cs:12.35,23.4) {$\Delta=12.664~\mu\mathrm{s}$};
+
+\node[font=\scriptsize,text=ArborBlue,align=left,anchor=west,
+  fill=white,fill opacity=0.88,text opacity=1,inner sep=1.5pt]
+  at (axis cs:14.2,5.0)
+  {$E$ starts on a faster branch:\\only $\max(0,q_E-\Delta)$ is visible};
+\node[font=\scriptsize,text=ArborOrange,align=left,anchor=west,
+  fill=white,fill opacity=0.88,text opacity=1,inner sep=1.5pt]
+  at (axis cs:10.4,17.6)
+  {$E$ is on the slowest branch:\\all $q_E$ is visible};
+\node[font=\scriptsize,text=ArborBlue,anchor=south]
+  at (axis cs:6.3,0.7) {blue case, $q_E\le\Delta$: no completion change};
+
+\node[font=\scriptsize,anchor=north west] at (axis cs:0.3,23.4)
+  {markers: measured medians; lines: pre-declared predictions};
+\end{axis}
+\end{tikzpicture}

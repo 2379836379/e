@@ -1,0 +1,96 @@
+\begin{tikzpicture}
+\begin{axis}[
+  arbor axis,
+  width=\linewidth,height=0.36\linewidth,
+  ymode=log,log basis y=2,
+  ymin=5,ymax=150,ytick={8,16,32,64,128},
+  yticklabels={8,16,32,64,128},
+  xmin=0.65,xmax=6.35,xtick={1,2,3,4,5,6},
+  xticklabels={{50\%\\aligned},{50\%\\staggered},{50\%\\random},
+    {25\%\\aligned},{25\%\\staggered},{25\%\\random}},
+  xticklabel style={font=\scriptsize,align=center},
+  ylabel={Median job completion time (ms)},
+  legend style={at={(0.5,1.03)},anchor=south,legend columns=4,
+    /tikz/every even column/.append style={column sep=5pt}},
+]
+\addplot[ArborGray,densely dotted,forget plot]
+  coordinates {(3.5,5) (3.5,150)};
+
+% The lines retain the two deterministic anchors within each duty point.
+\addplot[ArborBlue,thick,mark=*,restrict x to domain=1:2,
+  unbounded coords=jump]
+  table[col sep=comma,x=x,y=arbor]
+    {plots/data/pgf/capstone-phase.csv};
+\addlegendentry{Arbor}
+\addplot[ArborBlue,thick,mark=*,restrict x to domain=4:5,
+  unbounded coords=jump,forget plot]
+  table[col sep=comma,x=x,y=arbor]
+    {plots/data/pgf/capstone-phase.csv};
+\addplot[ArborOrange,thick,dashed,mark=square*,restrict x to domain=1:2,
+  unbounded coords=jump]
+  table[col sep=comma,x=x,y=atp]
+    {plots/data/pgf/capstone-phase.csv};
+\addlegendentry{ATP-like}
+\addplot[ArborOrange,thick,dashed,mark=square*,restrict x to domain=4:5,
+  unbounded coords=jump,forget plot]
+  table[col sep=comma,x=x,y=atp]
+    {plots/data/pgf/capstone-phase.csv};
+\addplot[ArborGreen,thick,dash dot,mark=triangle*,restrict x to domain=1:2,
+  unbounded coords=jump]
+  table[col sep=comma,x=x,y=switchml]
+    {plots/data/pgf/capstone-phase.csv};
+\addlegendentry{SwitchML-like}
+\addplot[ArborGreen,thick,dash dot,mark=triangle*,restrict x to domain=4:5,
+  unbounded coords=jump,forget plot]
+  table[col sep=comma,x=x,y=switchml]
+    {plots/data/pgf/capstone-phase.csv};
+\addplot[ArborGray,thick,dotted,mark=x,restrict x to domain=1:2,
+  unbounded coords=jump]
+  table[col sep=comma,x=x,y=p2p]
+    {plots/data/pgf/capstone-phase.csv};
+\addlegendentry{p2p-CCL}
+\addplot[ArborGray,thick,dotted,mark=x,restrict x to domain=4:5,
+  unbounded coords=jump,forget plot]
+  table[col sep=comma,x=x,y=p2p]
+    {plots/data/pgf/capstone-phase.csv};
+
+% Show every random phase assignment, then overlay its mean and t-95% CI.
+\addplot[ArborBlue,only marks,mark=*,mark size=1pt,opacity=0.25,
+  forget plot]
+  table[col sep=comma,x=x,y=arbor]
+    {plots/data/pgf/capstone-phase-points.csv};
+\addplot[ArborOrange,only marks,mark=square*,mark size=1pt,opacity=0.25,
+  forget plot]
+  table[col sep=comma,x=x,y=atp]
+    {plots/data/pgf/capstone-phase-points.csv};
+\addplot[ArborGreen,only marks,mark=triangle*,mark size=1pt,opacity=0.25,
+  forget plot]
+  table[col sep=comma,x=x,y=switchml]
+    {plots/data/pgf/capstone-phase-points.csv};
+\addplot[ArborGray,only marks,mark=x,mark size=1pt,opacity=0.25,
+  forget plot]
+  table[col sep=comma,x=x,y=p2p]
+    {plots/data/pgf/capstone-phase-points.csv};
+
+\addplot[ArborBlue,only marks,mark=*,mark size=2.3pt,forget plot,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=x,y=arbor,y error=arborCi95,
+    restrict expr to domain={\thisrow{samples}}{20:20}]
+    {plots/data/pgf/capstone-phase.csv};
+\addplot[ArborOrange,only marks,mark=square*,mark size=2.3pt,forget plot,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=x,y=atp,y error=atpCi95,
+    restrict expr to domain={\thisrow{samples}}{20:20}]
+    {plots/data/pgf/capstone-phase.csv};
+\addplot[ArborGreen,only marks,mark=triangle*,mark size=2.3pt,forget plot,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=x,y=switchml,y error=switchmlCi95,
+    restrict expr to domain={\thisrow{samples}}{20:20}]
+    {plots/data/pgf/capstone-phase.csv};
+\addplot[ArborGray,only marks,mark=x,mark size=2.3pt,forget plot,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=x,y=p2p,y error=p2pCi95,
+    restrict expr to domain={\thisrow{samples}}{20:20}]
+    {plots/data/pgf/capstone-phase.csv};
+\end{axis}
+\end{tikzpicture}

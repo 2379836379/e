@@ -1,0 +1,487 @@
+\chapter{设计}
+\label{chap:design}
+
+\sysname 将多播-聚合流实现为 channel，并以组播 credit 逐 packet offset
+推进。Credit Context 绑定 offset 与 subchannel，credit 副本沿下行路径取得
+逐级聚合位置；requester 带回这些位置后，request 在上行路径完成聚合。
+responder 再以完成事件选择 subchannel、约束后续 credit，并在异常时启动
+整组 repair。\Cref{tab:design-sync} 汇总这些规则如何满足
+\cref{ssec:inc-limits} 的上下文一致性与整组进度要求。
+
+\begin{table}[t]
+    \centering
+    \caption{\sysname 用同一组协议字段建立聚合上下文一致性并暴露整组进度。}
+    \label{tab:design-sync}
+    \small
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabularx}{\linewidth}{p{0.18\linewidth}YY}
+        \toprule
+        机制 & 上下文绑定 & 整组进度 \\
+        \midrule
+        多播-聚合流 &
+        定义路径、聚合位置与恢复的共同 packet-offset 边界 &
+        把 responder 与 requester group 的 request/response 关系作为一个传输对象 \\
+        组播 credit &
+        显式绑定 offset、subchannel 与逐级 slot &
+        requester group 消费同一份 credit，并继承同一 Credit Context \\
+        聚合器位置反馈 &
+        response 下行分配 slot，request 上行带回并通过 owner 校验 &
+        同一 offset 的所有输入在其共享的每一级命中同一聚合位置 \\
+        拥塞控制 &
+        responder 以 $r_s$ 和 $W_s$ 两道门约束后续 credit，repair 使用独立预算 &
+        fan-in 完成时间反映最慢分支，一份闭环完成时延样本约束整组速率 \\
+        可靠性 &
+        owner mismatch 生成失配通知，repair request 走旁路，二者都不产生正常完成样本 &
+        responder 组播 repair trigger，并用 requester 位图完成整组去重 \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+\section{总体设计}
+\label{ssec:design-overview}
+
+运行时把一次原语调用映射为一个或多个 channel message。每个 message 覆盖
+一段连续数据，并进一步切成固定大小的 packet。以 \texttt{AllReduce} 为例，
+数据按 rank 切片，每个 rank 作为一个切片的 responder，其它 rank 为该切片
+提供同一 packet offset 上的输入；其余原语的映射见
+\cref{ssec:channel-subchannel}。
+
+\begin{figure*}[t]
+\centering
+\input{plots/pgf/design_overview.tex}
+\caption{多播-聚合流与组播 credit。(a) responder 为 packet offset $k$
+在树 $s_1$ 上组播一份 credit；credit 副本逐级推进 allocator、取得 slot
+并压入位置栈，requester 凭 credit 发送 request，上行按栈逐级聚合并累计
+贡献数，整组到齐（$\times3$）后 responder 获得闭环完成样本。(b) 一个
+channel 预装多棵 subchannel 树，responder 按各树的 gate 分配后续 offset；
+同一 offset 的全部输入使用同一棵树。}
+\label{fig:design-overview}
+\end{figure*}
+
+\sysname 把 credit 附在 response 上组播下发：带 credit 的 response 授权
+一个 offset 和 subchannel，下行副本沿各自分支取得位置栈。requester 只有
+消费该 credit 后才发送对应 request，并带回本分支的位置与逐级 fan-in。
+上行聚合结果返回 responder 后，response 可以同时交付结果并授权新的
+offset。注册闭环负责 message readiness，数据闭环负责 packet 许可与完成
+（\cref{fig:design-overview}(a)）。
+
+\parab{注册闭环.}
+responder 只有在全组安装一条消息的本地状态后，才能为该消息发放 normal
+credit。requester 提交消息后，在各 subchannel 上周期发送轻量
+\texttt{REGISTER}；responder 为每个 message/subchannel 收集 requester
+readiness，并在本地消息也已提交后组播 \texttt{REGISTER\_ACK}。周期发送
+容忍控制包丢失，确认后 requester 停止对应信标。注册只确认 readiness，
+不授予 request 发送。\sysname 只让正常路径的包经过加速器，其余包由网络
+直接转发；拥塞控制也不采集注册阶段的样本。后续消息可以在当前消息传输期间
+异步注册，因此注册闭环不要求 channel 在消息边界停顿。
+
+\parab{Credit 驱动的数据闭环.}
+responder 按每个 subchannel 的速率门和窗口门发放 credit。Credit 通过
+response packet 组播给 requester group，使整组获得同一 offset 和
+subchannel 的后续许可；response 副本沿各自分支携带聚合器位置，同一聚合
+子树内的对应位置一致。readiness 完成后的数据 request 必须凭 credit 发送；
+同一个 response 可以返回一个 packet 的数据或完成信息，并授权另一个
+packet 的 request。负载均衡、拥塞控制与聚合器复用都由该 response/credit
+闭环驱动。
+
+\section{Channel 与 Subchannel}
+\label{ssec:channel-subchannel}
+
+channel 是多播-聚合流的协议表示：一个 channel 固定 responder 和
+requester group，并依次承载多个 message。subchannel 是该 channel 在具体
+拓扑上的一棵聚合树；每个 channel 独立定义自己的 subchannel 集合，不同
+集合可以共享物理链路（\cref{fig:design-overview}(b)）。不同 packet
+offset 可以选择不同 subchannel；同一 offset 的全部输入必须使用 credit
+指定的同一棵树。
+
+\Cref{tab:collective-mapping} 通过 channel 集合和用户 payload 方向表达
+六种原语。``全部 rank''表示每个 rank 对应的 channel 都承载一个数据切片；
+``root''只使用 root 对应的 channel。表中的有/无仅描述应用数据方向：
+\texttt{Reduce} 和 \texttt{ReduceScatter} 的 response 仍携带 completion
+与 credit，\texttt{Barrier} 的两个方向仍使用控制 packet。所有原语复用
+相同的 credit、选树、聚合和恢复规则。
+
+\begin{table}[t]
+\centering
+\caption{\sysname 在同一传输层数据通路上表达六种集合通信原语，差异仅在于
+channel 集合的选择与 request/response 中用户 payload 方向的配置。}
+\label{tab:collective-mapping}
+\begin{tabular}{lccc}
+\toprule
+原语 & Channel & Request payload & Response payload \\
+\midrule
+AllReduce & 全部 rank & 有 & 有 \\
+Reduce & root & 有 & 无 \\
+Broadcast & root & 无 & 有 \\
+AllGather & 全部 rank & 无 & 有 \\
+ReduceScatter & 全部 rank & 有 & 无 \\
+Barrier & 全部 rank & 无 & 无 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\parab{Credit Context.}
+在一个 channel 中，一份 credit 以 \texttt{(channel\_id, packet\_offset,
+subchannel\_id)} 定义一个 \emph{Credit Context}。\texttt{packet\_offset}
+标识本轮被授权的 packet，\texttt{subchannel\_id} 指定对应的聚合树。消费
+同一份 credit 的 requester 继承同一 Credit Context；responder 按
+\texttt{(channel\_id, packet\_offset)} 提交完成结果。
+
+\section{聚合器位置反馈}
+\label{ssec:agg-feedback}
+
+聚合树上的每一级加速器维护一个 allocator 和一个共享 slot 池；同一加速器
+的所有端口共用该池。Normal credit 沿下行路径经过各级加速器，每一级推进
+allocator，将取得的 slot 的 owner 设为该 credit 的 Credit Context，并把
+slot 编号压入位置栈。requester 因而只会收到已经取得沿途全部聚合位置的
+normal credit。Repair trigger 不分配 slot。
+
+\parab{Request 按位置栈逐级聚合.}
+requester 把 credit 返回的位置栈和逐级 fan-in 写入 request。若本级
+fan-in 为 1，加速器弹栈直转；否则按栈顶定位 slot，并验证 request 的
+Credit Context 与 slot owner。首个需要合并的输入绑定 fan-in、算子和
+payload shape；数据面同时检查输入是否属于当前支持的 data-type profile。
+后续输入通过相同参数检查后累加贡献数和 payload。单个 requester 输入贡献
+1，下层聚合结果贡献其携带的计数。贡献数达到本级 fan-in 后，加速器发出
+aggregated packet、弹出本级位置，并由上一级继续处理。\texttt{Broadcast}
+和 \texttt{AllGather} 使用同一计数路径合并空 request。
+
+所有聚合参数均随 request 携带，加速器无需预装通信组、rank 或源地址表。
+requester 对同一 Credit Context 至多发送一份 normal request；repair
+request 直接旁路。因此，slot 保存 owner、聚合元数据、贡献数和累加结果，
+但不保存 requester 身份或 per-requester bitmap。成员确认和 repair 去重由
+responder 完成。
+
+\parab{Owner 失配终止正常聚合.}
+owner 失配表示 credit 许诺的 slot 已被新的 Credit Context 覆盖。加速器
+丢弃 payload，并把 packet 改写为 header-only 的 \texttt{AGG\_MISS}；该
+通知不再进入后续各级的正常聚合。responder 收到通知后将对应 credit 原子地
+切换到 repair mode，并组播 repair trigger（\cref{ssec:reliability}）。
+通知丢失时，原 credit 的超时器触发相同恢复过程。该规则同样处理单个输入和
+下层 aggregated packet，不会把部分结果带入后续聚合级。
+
+\parab{覆盖复用无需端到端释放.}
+循环 allocator 通过覆盖复用 slot：normal credit 取得 slot 后，加速器
+原子地安装新的 Credit Context owner 并重置逻辑聚合状态。旧 owner 的迟到
+request 因 owner mismatch 产生 \texttt{AGG\_MISS}，responder 随后切入
+repair。该规则把 slot 生命周期限制在本级：安全时刻由本级结果读出或
+responder 的 repair cutover 确定。allocator 不等待端点或控制面发出显式
+释放消息，也不维护分布式 aggregation-slot free list。加速器仅在把本级
+结果复制到独立的完成缓冲区期间短暂阻止覆盖对应 slot；由此，slot 回收从
+端到端协议状态变为加速器内部的局部覆盖操作。每一级独立维护循环指针和
+owner；插入新的聚合层级只扩展 credit 的位置栈，不增加端点对该级 slot 的
+分配或释放状态。\Cref{sssec:slot-bound} 给出不提前覆盖正常 Context 的
+循环深度；深度不足时，被提前覆盖的 Context 转入 repair，旧部分结果仍
+不能进入新 Context。
+
+\section{Credit Context 与多路径选择}
+\label{ssec:response-credit}
+\label{ssec:packet-binding}
+
+\parab{Credit Context 唯一性.}
+多个 subchannel 的 response/credit 并行返回时，不同 subchannel 的 credit
+在不同 requester 上可能以不同相对顺序到达。若 requester 按本地``下一个
+未发送 packet''消费每个到达的 credit，同一份组播 credit 就可能在不同
+requester 上绑定到不同 packet offset，使同一轮 fan-in 混入不同 packet 的
+输入。\sysname 因此要求一份逻辑 credit 在所有 requester 上导出同一个
+Credit Context，把聚合上下文一致性（\cref{ssec:group-consistency}）落实
+为可检查的协议不变量。设组播 credit $C$ 逻辑上对应的 \texttt{channel\_id}、
+\texttt{credit\_offset} 和 \texttt{subchannel\_id} 分别为 $c(C)$、
+$k_c(C)$ 和 $s(C)$；requester $q \in Q$ 用 $C$ 实际发送的 request 继承的
+三元组为 $(c_q(C), \mathrm{offset}_q(C), s_q(C))$。本文称如下条件为
+\emph{Credit Context 唯一性}：
+\begin{equation}
+    \forall q \in Q,\quad
+    (c_q(C), \mathrm{offset}_q(C), s_q(C))
+    =
+    (c(C), k_c(C), s(C)).
+    \label{eq:credit-context-uniqueness}
+\end{equation}
+
+Credit Context 唯一性是组播 credit 的协议不变量。credit 确定 channel、
+packet offset 和 subchannel；requester 据此选择 packet 和聚合树，并带回
+沿途取得的位置栈（\cref{ssec:agg-feedback}）。未收到该 credit 的
+requester 不会为对应 offset 发送 request。缺失输入和 response 由
+\cref{ssec:reliability} 的恢复机制处理。
+
+\parab{Payload/Credit offset 绑定.}
+一个 response packet 可以返回 packet $p$ 的 payload 或完成信息，并用
+credit 授权 packet $k$ 的 request。协议分别使用 \texttt{payload\_offset}
+和 \texttt{credit\_offset} 绑定这两项语义；二者可以相同，也可以不同。
+\texttt{Broadcast} 和 \texttt{AllGather} 主要使用前者，\texttt{Reduce}
+和 \texttt{ReduceScatter} 主要使用后者，\texttt{AllReduce} 同时使用二者。
+Credit Context 唯一性约束 credit 授权的 offset，不受 response payload
+顺序影响。
+
+\parab{反馈驱动的逐-offset 选树.}
+responder 以 packet offset 为单位在多个预装 subchannel 间发放 credit。
+每个 subchannel 都有速率门 $r_s$ 和窗口门 $W_s$；只有发放间隔到期且
+未完成 credit 数小于 $W_s$ 时，该 subchannel 才能接收新的 packet
+offset。responder 在当前允许发放的 subchannel 间分配后续 offset，拥塞或
+恢复增多的 subchannel 因速率门收紧或窗口耗尽而获得更少 offset。已经发出
+的 Credit Context 始终绑定原 subchannel，不在途换树。
+
+\section{端到端拥塞控制}
+\label{ssec:cc}
+
+\parab{端点通过速率门和窗口门控制注入.}
+\sysname 不依赖运行时集中式控制器：普通交换机的转发与组播表项在建组前
+预装，responder 在本地更新每个 subchannel 的 $r_s$ 和 $W_s$，聚合加速器
+不参与拥塞控制决策。requester 只凭 credit 发送，因此 responder 可以用
+两道门控制每个 subchannel：速率门要求相邻 credit 的发放间隔不小于
+$P/r_s$，窗口门要求未完成 credit 数小于 $W_s$，其中 $P$ 是一份 credit
+授权的 packet 字节数，$r_s$ 和下式的 $x_s$ 均以 byte/s 计。令 $T_s$ 为该
+subchannel 的稳态闭环完成时延，则 requester 分支上的稳态注入速率满足
+\begin{equation}
+    x_s \le \min\left\{r_s,\frac{W_sP}{T_s}\right\}.
+    \label{eq:cc-two-gates}
+\end{equation}
+Rate-based、window-based 和 hybrid 控制律分别更新 $r_s$、$W_s$ 或二者。
+小数窗口用 $W_s=1$ 加 pacing 表示。显式标记和基于完成时延的算法共用该
+credit 发放接口，具体映射见 \cref{app:rate-modules}。
+
+\parab{闭环完成时延覆盖当前最慢分支.}
+responder 记录每份 credit 的发出时刻；当返回结果首次证明全组输入已经完成
+时，两者之差给出其\emph{闭环完成时延}。该时间覆盖 credit 组播下行、
+requester 消费、request 上行和 fan-in 聚合。令 $\mathcal{B}_s$ 表示
+subchannel $s$ 上从 responder 经 requester 再返回的分支集合，$d_b$ 表示
+分支 $b$ 对本轮完成的时延，则
+\begin{equation}
+    T_s=\max_{b\in\mathcal{B}_s} d_b.
+    \label{eq:completion-delay}
+\end{equation}
+requester 发送路径停顿和网络排队都可以进入 $d_b$；消息提交偏斜由此前的
+注册闭环吸收，不进入 normal credit 样本。只有决定最大值的分支直接改变
+本轮完成时间。一份 credit、一次整组完成和一个 $T_s$ 使整组 requester
+共享同一速率样本，无需沿途设备维护 per-flow 速率状态。
+
+\parab{最大完成时延过滤非关键分支排队.}
+考虑共享链路 $E$ 上增加的闭环排队时间 $q_E$。对一条经过 $E$ 的 channel
+$i$，令 $S_i$ 为经过 $E$ 的分支中最大的无队列完成时延，$M_i$ 为其余分支
+中的最大值；若所有分支都经过 $E$，定义 $M_i=-\infty$。于是
+\begin{equation}
+    T_i(q_E)=\max\{M_i,S_i+q_E\},\qquad
+    \Delta_i=\max\{0,M_i-S_i\}.
+    \label{eq:branch-slack}
+\end{equation}
+当 $q_E<\Delta_i$ 时，链路 $E$ 尚未决定该 channel 的完成时间，基于完成
+时延的模块不会因这部分排队降低整组速率。此时降速不能直接缩短该 channel
+的 fan-in 完成时间，反而会减少真正关键分支获得的流量。$q_E$ 达到
+$\Delta_i$ 后，经过 $E$ 的分支成为当前最慢分支，后续排队完整进入 $T_i$。
+因此，完成时延只让影响 collective 进度的分支直接参与速率调节。
+
+\parab{共享链路上的公平性取决于分支余量.}
+多个 channel 共享 $E$ 时，其 $\Delta_i$ 可以不同。若 $E$ 已是 channel
+$j$ 的关键分支，却仍落在 channel $i$ 的非关键分支上，$j$ 会先观察到排队
+并降速，$i$ 在 $q_E<\Delta_i$ 期间保持原速率。当 $i$ 已受其它分支限制且
+不超过 $E$ 的剩余容量时，该行为避免无效退让；否则，非对称路径、
+responder 放置和共享链路竞争会产生放置相关的公平性偏置。若所有竞争
+channel 都以 $E$ 为关键分支，行为退化为所选控制律在共享瓶颈上的行为；
+ECN 则可独立暴露任意分支上的队列。\Cref{ssec:eval-cc} 量化该吞吐与
+公平性权衡。
+
+\parab{参考状态与样本筛选.}
+responder 在发放 credit 时保存所选控制律所需的参考状态，使返回样本按
+发出时状态解释，避免用已经更新过的当前状态重复响应同一次拥塞。一份
+normal credit 首次完成时产生一个样本；\texttt{AGG\_MISS}、repair、重放和
+已经提交后的迟到输入不产生新样本，修复流量由 \cref{ssec:reliability} 的
+独立预算限速。显式标记、rate-based、window-based 与 hybrid 模块所需信号
+及其在该接口上的对应关系见\cref{app:rate-modules}。
+
+\parab{显式 ECN 只需传播整组标记.}
+基于 completion delay 的端侧算法只使用 responder 本地状态，不要求数据面
+增加拥塞控制逻辑。可选 ECN 算法让 requester 把下行 credit 上的 CE 回显到
+下一份 normal request，并在逐级聚合时对各输入的 CE 取 OR。responder 因而
+获得覆盖上下行路径和全组分支的单个标记。该传播不引入 per-flow 拥塞状态，
+控制律仍只在 responder 执行（\cref{app:rate-modules}）。
+
+\section{可靠性与重传}
+\label{ssec:reliability}
+
+\sysname 将正常路径的纯计数与恢复路径的身份去重分开。requester 在正常
+路径保证单注入，加速器按贡献数完成聚合；异常发生后，responder 将整个
+Credit Context 切换到 repair，并用 requester 位图完成去重和回退聚合。
+
+\parab{Normal request 单注入.}
+requester 对每个 Credit Context 至多发出一份 normal request。同一份
+credit 在 requester 本地只消费一次；之后对该 packet offset 的重发只由
+repair trigger 触发，并携带 repair 标志。repair request 旁路 slot。
+Normal request 在上行路径不被复制，因此同一 Credit Context 可以按贡献数
+聚合；repair 去重和幂等提交由 responder 位图处理。
+
+\parab{Responder 单点提交与重传.}
+responder 为每份 normal credit 保留未完成记录，并采用与 ATP 类似的单次
+提交语义~\cite{atp}。正常聚合结果只有在贡献数等于 requester group 规模时
+才能提交；提交后缓存的 response 不再被迟到输入改写。responder 是唯一的
+超时检测与恢复发起者，避免多个 requester 对同一份组播 credit 独立产生
+NACK。超时或 \texttt{AGG\_MISS} 将未完成 credit 原子地切换到 repair
+mode；此后迟到的正常聚合结果不能提交，该 Credit Context 只由 repair 路径
+完成。
+
+\parab{组播 repair trigger.}
+定时器超时或收到交换机的失配通知（\cref{ssec:agg-feedback}）后，
+responder 组播一份 repair trigger，携带 \texttt{(channel\_id,
+packet\_offset, subchannel\_id)}。该控制消息标识恢复范围，requester 据此
+沿原 subchannel 发送旁路正常聚合的 repair request。repair trigger 必须
+组播：responder 只能观察最终到达的 aggregated packet、\texttt{AGG\_MISS}
+和 repair request，看不到交换机 slot 中已经累加的部分状态，也无法可靠
+判断哪一个 requester 的输入缺失。Repair request 不再进入原 slot，而是
+直达 responder。因此恢复边界是整个 requester group：所有 requester 重新
+提交，responder 再用位图收齐并去重。Repair 流量使用独立保守预算，且不
+产生正常完成样本（\cref{ssec:cc}）。
+
+\parab{Response 重放不创建第二份 normal credit.}
+Response 重放不会使同一 requester 为一个 Credit Context 发送第二份
+normal request：未完成 credit 以 repair trigger 重发；缓存的尾部
+response 保留 normal credit 时，requester 按本地消费记录去重。已经提交的
+结果直接从缓存 response 重放，不重新执行聚合。重试耗尽后，该 collective
+失败，且不再复用其未确认的 message identifier。
+
+\parab{END 确认消息完成并回收状态.}
+消息末尾若干 packet 的 response 之后不再有新的 credit，其交付无法由后续
+credit 的消费隐式确认。全部 credit 完成后，responder 组播 \texttt{END}；
+requester 在本地消息完成后回复 \texttt{END\_ACK}。确认缺失时，responder
+重放尚未被后续 credit 确认的尾部 response，并重新发送 \texttt{END}。握手
+完成前，responder 保留相应 response 和消息状态；握手只延迟消息标识符
+复用，不阻止已经注册的后续消息使用新的 packet offset。
+
+\section{共享循环 allocator 的容量}
+\label{ssec:bounded-state}
+\label{sssec:slot-bound}
+
+每台交换机的全部端口和 job 共用一个带 owner 的 slot 池，每个 normal
+Credit Context 都推进同一个循环 allocator。本节要回答的问题可以说得很
+直白：池子要配多少个 slot，才能保证 allocator 转一圈回到某个地址时，
+上面的旧聚合一定已经结束？答案分两步：先给出一个精确的充要条件，再把
+它换算成只依赖端口线速的部署上界。
+
+\parab{循环复用的基本结构.}
+设池中有 $A_e$ 个 slot，第 $n$ 次 allocation 使用地址 $n\bmod A_e$。
+于是同一个地址恰好每隔 $A_e$ 次 allocation 被复用一次：某个 Context
+在第 $n$ 次 allocation 拿到 slot 后，下一个使用同址的正是第 $n+A_e$
+次 allocation。``复用是否安全''因此只取决于一个数字——从拿到 slot 到
+它可以被安全覆盖，allocator 中间又推进了多少次。只要这个数字不超过
+$A_e$，轮回到同址时旧 Context 必然已经结束。下面把``可以被安全覆盖''
+和``推进了多少次''说精确。
+
+\parab{复用保护区间.}
+覆盖一个 slot 唯一的危险，是旧 Context 之后仍可能在本级提交 normal
+结果。两类事件都会永久排除这种可能：本级聚合结果已经读出，或
+responder 已完成 repair cutover——此后迟到的 normal 结果不再能提交
+（\cref{ssec:reliability}）。对经过交换机 $e$ 的 normal Credit
+Context $x$，记 $t_a(e,x)$ 为绑定 slot 的时刻，$t_f(e,x)$ 为上述两类
+事件中先发生的时刻；$t_f$ 是 $x$ 的\emph{可安全覆盖时刻}，而非协议中
+的显式释放事件。半开区间 $[t_a(e,x),t_f(e,x))$ 称为 $x$ 的\emph{复用
+保护区间}，取 $R_e>0$ 为其长度的上界。
+
+\parab{精确最小深度.}
+令 $N_e(I)$ 表示事件区间 $I$ 内的 normal advance 数，对保护区间从
+$x$ 自身的 allocation（含）计到 $t_f$（不含）。所需深度由最坏的
+Context 决定：
+\begin{equation}
+ D_e=\sup_x N_e([t_a(e,x),t_f(e,x))).
+ \label{eq:allocator-exact-depth}
+\end{equation}
+用一句话读这个定义：$D_e$ 是``任何一个 Context 在自己还不能被覆盖的
+期间，整台交换机最多又发生了多少次分配''。计数覆盖全部 normal
+advance——fan-in 为 1、弹栈直转因而自身可立即覆盖的 Context 也占一次
+分配，同样推进循环指针。$D_e$ 只关于全部 job 合并后的同一条分配序列，
+池容量因此不需要按 job 或 rank 数再乘静态因子。同一时刻的 $t_f$ 与 allocation 按先释放、后
+分配排序；完整记账约定与实现无法保证该顺序时的处理见
+\cref{app:allocator-port-bound}。
+
+\begin{theorem}
+\label{thm:allocator-exact}
+第 $n$ 次 allocation 使用地址 $n\bmod A_e$ 时，normal path 不发生提前
+覆盖当且仅当
+\begin{equation}
+ A_e\geq D_e .
+ \label{eq:allocator-exact-condition}
+\end{equation}
+\end{theorem}
+
+\noindent\emph{证明.}
+充分性：任取 Context $x$，设它由第 $n$ 次 allocation 绑定，则复用
+同址的是第 $n+A_e$ 次。由 $A_e\geq D_e$，$x$ 的保护区间内至多有
+$A_e$ 次 advance（含 $x$ 自身），即区间内的 allocation 至多编号到
+$n+A_e-1$；第 $n+A_e$ 次因此不早于 $t_f$——覆盖发生时 $x$ 已可安全
+覆盖。必要性：若 $A_e<D_e$，按 \cref{eq:allocator-exact-depth} 存在
+Context $x$，其保护区间内的 advance 数超过 $A_e$，于是第 $n+A_e$ 次
+allocation 落在 $t_f$ 之前——同一地址在 $x$ 可安全覆盖前就被覆盖。
+\Cref{fig:allocator-timeline} 画出这两种情形。\hfill$\square$
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[font=\scriptsize]
+\draw[->,black!70] (-0.2,0) -- (8.6,0);
+\fill[ArborBlue,fill opacity=0.12] (0.6,0) rectangle (5.4,0.72);
+\draw[ArborBlue,thick] (0.6,-0.14) -- (0.6,0.72);
+\draw[ArborBlue,thick,dashed] (5.4,-0.14) -- (5.4,0.72);
+\node[ArborBlue!70!black,anchor=south] at (2.8,0.76)
+  {复用保护区间 $[t_a,t_f)$，长度 $\leq R_e$};
+\node[anchor=north,align=center] at (0.8,-0.22)
+  {$t_a$：第 $n$ 次 allocation\\绑定地址 $n\bmod A_e$};
+\node[anchor=north,align=center] at (5.6,-0.22) {$t_f$：可安全覆盖};
+\foreach \x in {1.3,2.0,2.7,3.4,4.1} \draw[black!55] (\x,-0.09) -- (\x,0.09);
+\draw[black!55] (7.1,-0.09) -- (7.1,0.09);
+\node[black!55,anchor=south] at (2.35,0.10) {后续 normal advance};
+\draw[ArborOrange,thick,->] (4.8,1.46) -- (4.8,0.12);
+\node[ArborOrange!85!black,anchor=south,align=center] at (4.3,1.48)
+  {第 $n{+}A_e$ 次（$A_e<D_e$）\\提前覆盖};
+\draw[ArborGreen!80!black,thick,->] (7.1,1.46) -- (7.1,0.12);
+\node[ArborGreen!55!black,anchor=south,align=center] at (7.3,1.48)
+  {第 $n{+}A_e$ 次（$A_e\geq D_e$）\\安全复用};
+\end{tikzpicture}
+\caption{循环复用的时间线。地址 $n\bmod A_e$ 在第 $n{+}A_e$ 次
+allocation 时被再次使用：保护区间内的 advance 数不超过 $A_e$（即
+$A_e\geq D_e$）时，同址复用必然落在可安全覆盖时刻 $t_f$ 之后；否则第
+$n{+}A_e$ 次分配落入区间内，构成提前覆盖。}
+\label{fig:allocator-timeline}
+\end{figure}
+
+容量不足不改变结果正确性。新 allocation 原子地安装新的 owner 并重置
+逻辑聚合状态；覆盖后到达的旧 request 无法通过 owner 检查，并被改写为
+\texttt{AGG\_MISS}。若不再有旧 request 到达，responder timeout 仍会
+切入 repair。Normal request 单注入又阻止旧 Context 开始第二轮聚合。
+欠配因而增加 repair，但不会把旧部分结果提交给新的 Context。
+
+\parab{端口速率把 $D_e$ 换算为部署深度.}
+$D_e$ 是协议量，部署者需要能直接从链路参数算出的上界。物理直觉是：
+每一次 advance 最终都对应一份至少 $P$ bytes 的 payload packet 经过
+某个端口，而端口串行化限制了任何时间窗内能通过的这类包数——一个
+100-Gbps 端口发送一个 8-KiB 包约需 0.66~\textmu s，长度 $R_e$ 的窗口
+内它至多承载约 $R_e/(0.66~\mu\mathrm{s})$ 次由它见证的推进。形式化地，考虑
+每个 advance 都对应一个正常完成的 fixed-$P$ data context；若每个
+context 都能与 allocation 后 $R_e$ 内一份至少携带 $P$ bytes 的
+payload packet 一一对应，令 $\mathcal P_e$ 为这些 packet 实际经过的
+有向端口集合，$C_p$ 为端口 $p$ 的线速，则
+\begin{equation}
+ D_e\leq
+ \sum_{p\in\mathcal P_e}
+ \left\lceil\frac{2C_pR_e}{8P}\right\rceil .
+ \label{eq:allocator-directed-port}
+\end{equation}
+若推进 allocator 的 packet 本身就携带至少 $P$ bytes，配对区间从
+$2R_e$ 收紧为 $R_e$：
+\begin{equation}
+ D_e\leq
+ \sum_{p\in\mathcal P_e}
+ \left\lceil\frac{C_pR_e}{8P}\right\rceil .
+ \label{eq:allocator-payload-carrier-bound}
+\end{equation}
+两条界均按实际推进同一个共享 allocator 的端口求和。payload 配对与
+两倍区间的证明，以及面向提供 advance 到达包络保证的实现、不依赖
+payload 配对的另一条充分条件，见 \cref{app:allocator-port-bound}。
+
+在 payload 一一配对前提仍成立时，若部署通过 admission、shaping 和
+normal-to-repair deadline 保证保护时间不超过 $R_{\max}$，就可以在
+上述容量式中直接使用 $R_{\max}$。沿用上面的直觉：100-Gbps 端口、
+$P=8192$ bytes、$R_{\max}=100$~\textmu s 时，
+\cref{eq:allocator-payload-carrier-bound} 给出 153 个 slot，即约
+1.20~MiB payload memory，另加 metadata。部署使用契约保证的
+$R_{\max}$，而非运行 trace 中观察到的最大值。
+
+由循环复用的基本结构，任意连续 $A_e$ 次 allocation 恰好访问每个地址
+一次；$A_e\geq D_e$ 时，全部已配置 slot 都是无冲突容量，不受哈希冲突
+或 per-job 分区碎片影响。\Cref{ssec:eval-state} 在共用端口和端口分散
+两种放置中核对实测 $D_e$ 与 \cref{eq:allocator-payload-carrier-bound}。

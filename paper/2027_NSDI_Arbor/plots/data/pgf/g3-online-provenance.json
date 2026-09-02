@@ -1,0 +1,52 @@
+{
+  "source_audit": "reports/transport-v2-g3-final-full-audit-freeze6.json",
+  "source_audit_sha256": "3c69e59ea1ad22e97d152a487db4bab54ea353321309d9203a0945f7f69a1716",
+  "source_manifest": "l3/manifests/transport-v2-g3-final-fixed4-composite-freeze6.jsonl",
+  "source_manifest_sha256": "5c79a62f16f75806fab58f1326897fbe0d457fcb15deb76a1265edbee78af788",
+  "status": "PASS",
+  "tables": {
+    "overlap": {
+      "path": "../paper/nsdi/plots/data/pgf/g3-online-overlap.csv",
+      "rows": 3,
+      "sha256": "2b788898abaa61d8aaeeef77b6d1d186b5881f4092920f6f9cedb0abc3f07e03"
+    },
+    "residual_collective_one": {
+      "path": "../paper/nsdi/plots/data/pgf/g3-online-residual-collective-one-v1.csv",
+      "rows": 5,
+      "sha256": "e259e5ede05626f32d58ec214250e87da7158cdb6f5a9e4078708552135883b2",
+      "metric": "256-MiB logical bytes / mean end-to-end collective completion time",
+      "normalization": "fixed 200-Gbps host access rate"
+    },
+    "residual_collective_multi": {
+      "path": "../paper/nsdi/plots/data/pgf/g3-online-residual-collective-multi-v1.csv",
+      "rows": 3,
+      "sha256": "cf322efb5b9ab9bf4967d2f326904eba587ebe1e446e66bac5a2f1c63c97906f",
+      "metric": "256-MiB logical bytes / mean end-to-end collective completion time",
+      "normalization": "fixed 200-Gbps host access rate"
+    },
+    "indirect_path_reuse": {
+      "path": "../paper/nsdi/plots/data/pgf/g3-indirect-c3-timeline-v3.csv",
+      "rows": 14,
+      "sha256": "8995a7a2ce022e9e7e6626463312206f873c86214be825689e23872e078660d5",
+      "metric": "B per-root issued rate and A completed goodput over complete 12.8-ms half-periods",
+      "audit": "reports/g3-indirect-c3-final-v3-audit.json",
+      "audit_sha256": "ecbdbc2954546401cbae1a4c279b9d8d3f20f0cab2d672fc19a1107e82e0e32f"
+    },
+    "rotation_cumulative": {
+      "path": "../paper/nsdi/plots/data/pgf/g3-online-rotation-cumulative.csv",
+      "rows": 513,
+      "sha256": "bd3f133fb91a1a92fc6f985ebeb8ff5d4a4fc7a2f1babd9c4d7ac379cce31025"
+    },
+    "rotation_recovery": {
+      "path": "../paper/nsdi/plots/data/pgf/g3-online-rotation-recovery.csv",
+      "rows": 4,
+      "sha256": "a2e91d34a34fd20357e42c577d27a478751a0e65d21d8dee68aea721ca42417e"
+    }
+  },
+  "residual_collective_redraw": {
+    "audit": "reports/g3-figure13-collective-v1-audit.json",
+    "audit_sha256": "d84adb5a9e2aae145d5a375dec512e1c5418deb7185eeed704fb25181897a3b8",
+    "exporter": "l3/reexport_g3_residual_collective.py",
+    "exporter_sha256": "026b6c07598f7e7ba8a17e3e4a14e91fd24b58505c4f92d25c80b6774253f327"
+  }
+}

@@ -1,0 +1,240 @@
+\chapter{大模型训练评估}
+\label{chap:llm-evaluation}
+
+\Cref{chap:simulation} 分别隔离了共享聚合状态、逐-offset 选树、拥塞控制和
+恢复机制。本章把这些机制放回带计算依赖的训练计划，报告 FSDP 阶段窗口和
+4D final-microbatch backward tail 的完成时间。两类结果均来自直接包级仿真；
+backward tail 的边界从所有 rank 到达冻结的 entry barrier 开始，到所有 rank
+完成 exit barrier 为止，不外推为完整 optimizer step。
+
+% TODO(testbed-v80-gpu): 在正式硬件实验完成后，于本章开头增加一节物理
+% GPU/PyTorch 训练片段。固定四 rank、每 rank 一张 GPU/NIC、相同模型片段与
+% optimizer 边界，报告 GPU-resident tensor 的端到端时间、Arbor 与未加速
+% backend 的配对加速比、正确性和流水线分解。第五章只报告 transport/core/
+% FPGA 指标；这里不重复其吞吐微基准。已有的“双 GPU 分片到单 NIC”工程 smoke
+% 不作为该训练拓扑的结果。
+
+\section{实验设置与比较边界}
+\label{ssec:llm-setup}
+
+\parab{拓扑与运行.}
+本章使用两个冻结的 2,048-GPU Clos。8B FSDP phase-window 保留
+4:1 配置：host、ToR--leaf 和 leaf--spine 链路均为 400~Gbps。
+70B Classic 3D 及 405B direct-tail 矩阵使用固定 2:1 配置：64 个 ToR、
+16 个 leaf 和 8 个 spine，每个 ToR 连接 32 张 GPU；host 链路为
+400~Gbps，ToR--leaf 和 leaf--spine lane 为 800~Gbps，逐链路时延为
+3~\textmu s。物理 packet buffer 为 128~MiB，每个聚合 slot 承载
+8-KiB payload；各 workload 的聚合容量在相应小节单独给出。包级网络开启
+ECN 和 PFC；PFC 只提供无损保护，结果同时审计 ECN、pause、drop、最终队列
+和协议状态。
+
+\parab{指标与重复.}
+H100 计算时间来自冻结的 analytical roofline，而非实测 GPU trace。确定性
+实验使用 seed 1。FSDP phase-window 每点运行一个 warm-up、一个 measured
+和一个 cooldown iteration；matched-granularity direct-tail 矩阵运行一个
+warm-up 和一个 measured iteration，不再启动 cooldown。两类实验均只有一个
+measured observation，不生成统计误差条。
+
+\parab{比较口径.}
+本文以 compute-inclusive phase completion 或 backward-tail completion
+比较系统。collective logical goodput 用完整输出 tensor 大小除以完成时间；
+其分子不含链路复制和 header，不能解释为物理链路带宽。对 $N$-rank NCCL
+ring，AllGather/ReduceScatter 的 bus bandwidth 等于 logical goodput 乘以
+$(N-1)/N$，AllReduce 则乘以 $2(N-1)/N$。因此，DP4 AllGather 的
+524.05~Gbps logical goodput 对应 393.04~Gbps bus bandwidth，没有超过
+400-Gbps 链路线速。多 job 实验的 job 使用互斥 GPU 集合；direct
+backward-tail 实验还固定模型、batch、并行维度、rank placement 和计算 DAG，
+只替换 scale-out collective 的实现。
+
+\parab{Scale-up 与 scale-out 分开控制.}
+FSDP phase-window 实验保留两个 NCCL 对照。NCCL-flat 让全部 128 个 rank
+直接通过 Ethernet 执行 collective；NCCL-NVLink 先在每个八 GPU 节点内执行
+RS/AG，再让八个 16-node shard 并行使用 scale-out 网络。Arbor 行不包含
+NVLink 阶段，128-rank AllGather 和 ReduceScatter 全部由 Arbor 在
+scale-out fabric 上完成。因此，该实验给 NCCL 保留了更强的本地层次，但
+不构成两种系统共享同一 scale-up 通路的比较。direct-tail 实验为所有系统
+固定相同的 node-local TP/NVLink 与 PP 点对点通路，只改变跨节点 collective。
+
+\parab{Baseline 拥塞控制.}
+NCCL 及 ATP/SwitchML hybrid 的 scale-out RDMA 均启用 packet-level DCQCN。
+DCQCN 只作用于这些 RDMA/P2P QP；ATP 的网内聚合流量使用其 ECN-AIMD
+窗口，SwitchML 的聚合流量不包含端侧速率控制，两者均不继承 DCQCN。
+\Cref{app:sim-models} 给出预先声明的有限调参预算；每类 workload 只在该预算内
+选择 profile，并在新的随机运行上通过 held-out 检查后冻结。正式运行同时核对
+DCQCN 配置、QP 实际降速、ECN、PFC、drop 和最终队列排空。该流程避免以默认或
+未生效的拥塞控制代表 baseline，但不声称搜索得到 DCQCN 的全局最优参数。所有
+P2P QP 中最低的测量期平均速率达到 400-Gb/s 线速的 95\% 时，记为无实质降速；
+瞬时最小速率、ECN 和队列状态仍单独报告。
+
+\parab{聚合状态.}
+FSDP phase-window 的 Arbor 运行使用 65,536 个 slot 的非约束观测池，避免
+选定控制参数时混入容量不足。全部正式 Arbor 点中，最大 live occupancy 为
+9,293 slots，最大 allocation-sequence reuse depth 为 13,993 slots；随后
+冻结的 16,384-slot（128-MiB）统一容量高于该观测深度。这个检查说明
+128~MiB 对已运行 trace 足够，但 phase-window 数字仍来自配置 512~MiB
+观测池的原始运行，而不是一次事后标记为 128~MiB 的重跑。
+
+\section{FSDP 阶段窗口}
+\label{ssec:llm-fsdp-windows}
+
+该实验从 Llama-3.1-8B 的 128-rank weight-sharded 训练 DAG 中截取两个原生
+窗口：forward 使用第 15 层的 compute 与 AllGather，backward 使用第 15、
+14 层并保留 prefetch-distance-1 的 AllGather/ReduceScatter 重叠。每个
+job 的计算节点、tensor 大小、通信组和依赖在三个 backend 间完全一致；
+$J\in\{1,4,8,12,16\}$ 只改变共享同一 Clos 的独立 job 数。结果衡量这些
+窗口的完成时间，不外推完整训练 step、MFU、收敛速度或 time-to-accuracy。
+
+\begin{table*}[t]
+\centering
+\small
+\caption{Llama-3.1-8B FSDP compute-inclusive phase completion。时间单位为
+ms；speedup 为 NCCL-NVLink 时间除以 Arbor 时间，大于 1 表示 Arbor 更快。
+每点包含一个 measured iteration。}
+\label{tab:llm-fsdp-phase}
+\begin{tabular}{llrrrr}
+\toprule
+阶段 & $J$ & Arbor & NCCL-flat & NCCL-NVLink &
+Arbor speedup vs. NVLink \\
+\midrule
+Forward  & 1  & 10.376 & 11.143 &  7.581 & 0.731$\times$ \\
+         & 4  & 10.376 & 11.143 &  7.517 & 0.724$\times$ \\
+         & 8  & 10.377 & 11.143 &  9.262 & 0.893$\times$ \\
+         & 12 & 10.377 & 16.485 & 12.082 & 1.164$\times$ \\
+         & 16 & 10.379 & 19.903 & 12.413 & 1.196$\times$ \\
+\midrule
+Backward & 1  & 50.142 &  55.487 & 35.251 & 0.703$\times$ \\
+         & 4  & 50.142 &  55.487 & 37.566 & 0.749$\times$ \\
+         & 8  & 50.195 &  55.488 & 53.360 & 1.063$\times$ \\
+         & 12 & 51.083 & 100.682 & 63.505 & 1.243$\times$ \\
+         & 16 & 51.254 & 108.257 & 72.299 & 1.411$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\Cref{tab:llm-fsdp-phase} 显示，低并发时 NCCL-NVLink 的本地层次降低了
+phase time：forward 在 $J\leq8$、backward 在 $J\leq4$ 均快于不使用
+NVLink 的 Arbor。随着共享 scale-out fabric 上的 job 数增加，Arbor 的
+phase time 变化较小，并分别在 forward 的 $J=12$ 和 backward 的 $J=8$
+越过 NCCL-NVLink。$J=16$ 时，Arbor 的 forward 和 backward 分别快
+$1.196\times$ 和 $1.411\times$；相对 NCCL-flat 则分别快
+$1.918\times$ 和 $2.112\times$。在该配置范围内，node-local collective
+降低了低竞争时延，但没有消除高并发下 scale-out collective 对 phase time
+的影响；这些结果不说明 Arbor 使用了或替代了 NVLink。
+
+\section{405B 4D-FSDP backward tail}
+\label{ssec:llm-405b-fourd-fsdp}
+
+405B 4D-FSDP workload 使用 Llama-3.1-405B、8,192-token sequence、TP8、PP8、
+CP2 和 DP16，共 2,048 张 GPU；多租户配置把 DP 缩为 4，使每个 job 使用
+512 张互斥 GPU。所有系统复用相同的 node-local TP/NVLink、PP 点对点通信、
+计算 DAG 和 placement。Arbor 直接执行 scale-out AllReduce、AllGather 和
+ReduceScatter；ATP 与 SwitchML 只执行其支持的 scale-out AllReduce，其余
+scale-out collective 使用相同的 NCCL-flat/RDMA fallback。该 hybrid 对照
+把 AllReduce-only INC 的收益与 Arbor 的多原语支持分开。
+
+Arbor 按通信组规模选择 AllGather 注入方式。单 job 的 DP16 依次执行各
+owner 的广播，避免多个 owner 同时向同一接收端汇聚；多 job 的 DP4 允许
+四个 owner 并发，并把每个 owner 的每 subchannel 速率设为
+$B/((N-1)S)$，使每个接收端的三路输入之和不超过 400~Gbps。DP4 使用独立的
+Swift profile（window 96、target queue 20~\textmu s、$\beta=0.05$、
+$AI=0.5$），DP16 保留顺序语义及原 profile。独立的 forward 与 backward
+DP4 包级运行均达到 490.961~Gbps logical goodput，即 368.221~Gbps bus
+bandwidth；两点均为零 PFC、drop 和 repair，结束时队列与聚合状态清空。
+
+多租户配置在运行前一次登记四个租户，并在 $J=1,2,3,4$ 间保持同一
+SwitchML 分区。已声明 communicator 在 ToR、leaf 和 spine 上的逐交换机
+demand 分别为 48、128 和 64，leaf 是约束层；两个不可借用 physical set
+把 16,384 个 slot 等分为每棵树每 set $Q=64$。leaf 上只经过 sharded-DP
+树，因此即使管理员按 collective 类别离线分配，CP 树释放的状态也不能扩大
+该约束层上的 DP window。未活跃租户的分区不被借用，故 $J=1$ 同样包含为
+四租户声明上限预留状态的代价。
+
+正式评估直接运行冻结 DAG 的 final-microbatch backward tail。U1/DP16 使用
+全部 2,048 张 GPU；U4/DP4 在同一四租户预注册 universe 下运行
+$J=1,2,3,4$，其中 $J=1$ 是静态预留已经发生但尚无租户竞争的诊断 control，
+$J=2,3,4$ 构成多租户曲线。$J=3$ 在其余点完成后释放，不参与协议或参数选择。
+每点保留原生 compute、TP、CP、PP、AllReduce、AllGather 和 ReduceScatter
+依赖，并审计全部 DAG 节点、通信字节、ECN、PFC、drop、DCQCN 实测速率、
+聚合状态和最终队列。早期稿件使用单独 calibration 得到的 operation 时延
+重新调度完整 step；DP4 AllGather 语义修正后，这批组合结果已作废。
+
+% DIRECT 405B TAIL RESULT PLACEHOLDER (2026-08-20): insert the U1 and
+% U4/J={1,2,3,4} four-system table only after all direct packet runs pass the
+% streamed DAG/runtime/protocol audit and the 40-point paper-data join.
+
+\section{70B Classic 3D：隔离 scale-out AllReduce}
+\label{ssec:llm-70b-classic-threed}
+
+该实验回答一个更窄的问题：当训练 DAG 中由 backend 选择的 scale-out
+collective 只有 AllReduce 时，Arbor 相对 NCCL、SwitchML 和 ATP 的
+compute-inclusive tail 收益是多少？workload 使用 Llama-3.1-70B、
+8,192-token sequence、microbatch 1、gradient accumulation 32 和 1F1B。
+三个并行维度固定为 TP8、PP16 和 DP，CP 为 1；U1、U4 和 U8 分别取
+DP16、DP4 和 DP2，因此每个 job 使用 2,048、512 和 256 张 GPU。
+四种系统共享计算 DAG、node-local TP/NVLink、PP RDMA、placement 和
+arrival time；只有 FP32 gradient AllReduce 的 scale-out backend 不同。
+该控制避免把 SwitchML/ATP 不支持 AllGather 或 ReduceScatter 的 fallback
+代价计入比较，但 tail 仍包含各系统共有的计算和非 scale-out 通信，因而不是
+孤立的 AllReduce 微基准。
+
+正式矩阵包含五个 cell：U1/J1，以及 U4 的 $J=1,4$ 和 U8 的 $J=2,8$。
+后两组分别构成 25\% 和 100\% active-GPU 的匹配对照：
+$1\times512$ 对 $2\times256$，以及 $4\times512$ 对 $8\times256$。
+从 U4 到 U8，active communicator 数分别由 128 增为 256、由 512 增为
+1,024；总 active GPU 和 aggregate DP replica 数保持不变，但 DP group size
+从 4 变为 2，因此该对照同时包含通信粒度变化。每个 aggregation-capable
+switch 为所有 INC 系统固定 64~MiB，即 8,192 个 8-KiB slot；SwitchML
+使用预先冻结的双 physical-set 静态分区（$Q=32$），未活跃 communicator
+的分区不可借用。Arbor 的 PP/collective work-conserving 调度约定见
+\cref{app:classic-pp-scheduler}。
+
+冻结 DAG 直接执行 final-microbatch backward tail；mb0--mb30 的已完成累积
+状态由 all-rank entry barrier 表示。每个 cell 先运行一个 warm-up tail，
+再运行一个 measured tail。主指标从 measured entry barrier 的最晚 rank
+ready 开始，到最晚 active tenant 完成为止；多租户平均值只作描述性统计，
+不充当独立重复。
+
+\begin{table*}[t]
+\centering
+\small
+\caption{70B Classic 3D final-microbatch backward-tail completion。时间单位
+为 ms，越低越好；主指标取 active tenant 的最大完成时间。``最快 baseline''
+在 NCCL、SwitchML 和 ATP 中逐 cell 选择，最后一列为 Arbor 相对它的时间
+降幅。每个 cell 包含一个 measured iteration。}
+\label{tab:llm-classic3d-tail}
+\setlength{\tabcolsep}{3.5pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llrrrrlr}
+\toprule
+Cell & jobs$\times$GPUs/job & Arbor & NCCL & SwitchML & ATP &
+最快 baseline & 降幅 \\
+\midrule
+\inputtabularbody{plots/data/pgf/classic3d-2to1-table-body.tex}
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+\Cref{tab:llm-classic3d-tail} 中 Arbor 在五个 cell 均最快，完成时间为
+349.960--376.935~ms。相对 SwitchML，Arbor 将 tail 缩短
+21.8\%--27.2\%；相对 NCCL 和 ATP 的降幅分别为 20.5\%--39.5\% 和
+13.9\%--81.5\%。若逐 cell 只比较最快 baseline，降幅仍为
+13.9\%--27.1\%。ATP 的 U1/J1 点为 1,935.962~ms，并同时出现 4,085 次
+PFC pause；表中保留该 return-zero、最终排空的异常慢点，而不截断或以其它
+运行替换。
+
+匹配对照没有显示 SwitchML 随 communicator 增多而退化。25\% load 下，
+U8/J2 相对 U4/J1 的 completion ratio 在 Arbor 和 SwitchML 上分别为
+0.998 和 0.999；100\% load 下分别为 0.998 和 1.001。该结果说明本 workload
+中的静态分区尚未成为 SwitchML 的可见瓶颈；它支持五个 cell 上的端到端
+AllReduce-backend 比较，但不能单独证明 Arbor 的收益来自动态 SRAM 共享。
+同时，由于 U4/U8 还改变 DP group size，这两个 ratio 只作为匹配负载下的
+粒度敏感性结果，不作单变量因果解释。
+
+所有 Arbor cell 均为零 PFC、零 drop、零 protocol violation 和零 timeout，
+结束时队列与 live aggregation state 清空。U4/J4 并非零 miss：它记录
+5,656 次 aggregation miss、5,528 次 repair trigger 和同数 repair commit，
+最终 live slot 为 0。因而该点表明 repair 在这条 trace 上完成了恢复，而不
+表明 64~MiB 消除了所有容量压力。每个 cell 只有 seed 1 的一个确定性重复；
+此外 U4/J1 Arbor 是冻结调度方法时使用并随后按 exact-run 身份提升的 canary，
+不是独立 held-out 重复。这些数字限定为该 direct tail，不外推完整 optimizer
+step、MFU 或 time-to-accuracy。

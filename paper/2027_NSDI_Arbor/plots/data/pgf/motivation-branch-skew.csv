@@ -1,0 +1,3 @@
+x,metric,baseline,contended,relative,relativeCi,label
+0,State holding time,31.833,127.243,3.997204159,0.0,4.0x
+1,Safe slot depth,89.0,228.666666667,2.56928839,0.016114804,2.6x
