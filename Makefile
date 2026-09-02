@@ -11,7 +11,7 @@ HOSTS     = host1 host2 host3 host4
 ROUTERS   = router-root router-a router-a0 router-a1
 N         = 4
 TEST_ROOT = tests
-TEST_CONFIG_DIR = $(TEST_ROOT)/config
+TEST_CONFIG_DIR = topology/tree
 TEST_SCRIPT_DIR = $(TEST_ROOT)/scripts
 TEST_DATA_DIR = $(TEST_ROOT)/data/current
 TEST_OUT_DIR = $(TEST_ROOT)/out
@@ -39,10 +39,10 @@ setup_env:
 	docker image build -t node .
 
 setup_topo:
-	./setup_star.sh setup
+	./topology/tree/setup.sh setup
 
 clean_topo:
-	./setup_star.sh clean
+	./topology/tree/setup.sh clean
 
 kill:
 	-@for c in $(ROUTERS) $(HOSTS); do docker exec $$c pkill -f $(TARGET) 2>/dev/null; done

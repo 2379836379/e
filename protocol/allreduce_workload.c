@@ -25,32 +25,9 @@ static int init_host_channel_for_allreduce(const lab_config_t *config, int rank,
                         lab_config_ip_of_rank(config, (int)channel_id));
 }
 
-static void dirname_copy(const char *path, char *out, size_t out_sz) {
-    const char *slash;
-    size_t len;
-
-    if (!out || out_sz == 0) return;
-    if (!path || !path[0]) {
-        snprintf(out, out_sz, ".");
-        return;
-    }
-    slash = strrchr(path, '/');
-    if (!slash) {
-        snprintf(out, out_sz, ".");
-        return;
-    }
-    len = (size_t)(slash - path);
-    if (len == 0) len = 1;
-    if (len >= out_sz) len = out_sz - 1;
-    memcpy(out, path, len);
-    out[len] = '\0';
-}
-
 static void tests_root_from_config(const char *config_path, char *out, size_t out_sz) {
-    char config_dir[512];
-
-    dirname_copy(config_path, config_dir, sizeof(config_dir));
-    dirname_copy(config_dir, out, out_sz);
+    (void)config_path;
+    snprintf(out, out_sz, "tests");
 }
 
 static void read_input(const char *config_path, int rank, int32_t *buf, uint32_t maxints) {

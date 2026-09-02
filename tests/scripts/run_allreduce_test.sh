@@ -8,7 +8,7 @@ DATA_DIR="$TEST_ROOT/data/current"
 SCRIPT_DIR="$TEST_ROOT/scripts"
 CONFIG_DIR="$TEST_ROOT/config"
 BIN="$ROOT/build/inc"
-CFG_PATH="tests/config/ranks.cfg"
+CFG_PATH="topology/tree/ranks.cfg"
 HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router-root router-a router-a0 router-a1)
 N=4
@@ -20,7 +20,7 @@ cleanup() {
     docker exec "$c" pkill -f /app/build/inc >/dev/null 2>&1 || true
     docker exec "$c" pkill -f /app/inc >/dev/null 2>&1 || true
   done
-  bash "$ROOT/setup_star.sh" clean >/dev/null 2>&1 || true
+  bash "$ROOT/topology/tree/setup.sh" clean >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -32,8 +32,8 @@ rm -f "$OUT_DIR"/output-*.data "$OUT_DIR"/*.log
 make -C "$ROOT" >/dev/null
 bash "$SCRIPT_DIR/helper.sh" gen "$N" "$NINTS"
 bash "$SCRIPT_DIR/helper.sh" sum "$N"
-bash "$ROOT/setup_star.sh" clean >/dev/null 2>&1 || true
-bash "$ROOT/setup_star.sh" setup
+bash "$ROOT/topology/tree/setup.sh" clean >/dev/null 2>&1 || true
+bash "$ROOT/topology/tree/setup.sh" setup
 for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do
   docker exec "$c" mkdir -p /app/build /app/tests/out /app/tests/data/current
   docker exec "$c" rm -f /app/tests/out/output-*.data /app/tests/out/*.log
