@@ -1,4 +1,0 @@
-scenarioIndex,scenario,scenarioLabel,feasible,uniform,beststatic,dynamic
-0,disjoint,Disjoint,800.0,776.183808,776.183808,777.614677333
-1,avoidable,Avoidable,800.0,369.076906667,770.413909333,771.224917333
-2,unavoidable,Unavoidable,400.000001,385.796778667,385.796778667,386.023424
