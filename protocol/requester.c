@@ -234,7 +234,7 @@ static void send_request_frame(subchannel_ctx_t *sc, uint32_t src_ip, uint32_t d
         ip->tos = (uint8_t)((ip->tos & ~ARBOR_IPV4_ECN_MASK) | ARBOR_IPV4_ECN_CE);
     }
     arbor_store_message_id(frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t), message_id);
-    if (c->repair) stats[sc->subchannel_id].repair_sent++;
+    if (c->repair) { stats[sc->subchannel_id].repair_sent++; fprintf(stderr, "[repair-request-tx] ch=%u sub=%u offset=%u msg=%u\n", c->channel_id, c->subchannel_id, c->credit_offset, (unsigned)message_id); }
     else stats[sc->subchannel_id].request_sent++;
     host_inject_on_subchannel(sc->subchannel_id, frame, len);
 }
@@ -386,7 +386,10 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                             m.credit_offset, local_credit_offset, m.agg_depth,
                             (unsigned)repair_valid, rank_of_ip(m.src_ip));
                     stats[m.subchannel_id].credit_recv++;
-                    if (repair_valid) stats[m.subchannel_id].repair_trigger_recv++;
+                    if (repair_valid) {
+                        stats[m.subchannel_id].repair_trigger_recv++;
+                        fprintf(stderr, "[repair-trigger-rx] ch=%u sub=%u msg=%u offset=%u src_rank=%d\n", channel_id, m.subchannel_id, (unsigned)m.message_id, m.credit_offset, rank_of_ip(m.src_ip));
+                    }
                     enqueue_credit_local(&credit_q, local_credit_offset,
                                          repair_valid ? 0 : m.agg_depth,
                                          repair_valid ? NULL : agg_stack,

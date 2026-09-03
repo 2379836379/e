@@ -116,9 +116,11 @@ static int load_ranks(const char *path) {
         if (sscanf(tok, "%d", &rc->rank) != 1) continue;
         tok = strtok_r(NULL, ", \t\r\n", &save); if (!tok) continue; strncpy(rc->host_name, tok, sizeof(rc->host_name) - 1);
         tok = strtok_r(NULL, ", \t\r\n", &save); if (!tok) continue; strncpy(rc->host_ifaces[0], tok, sizeof(rc->host_ifaces[0]) - 1);
+#if SUBCHANNEL_COUNT > 1
         tok = strtok_r(NULL, ", \t\r\n", &save); if (!tok) continue; strncpy(rc->router_ifaces[0], tok, sizeof(rc->router_ifaces[0]) - 1);
         tok = strtok_r(NULL, ", \t\r\n", &save); if (!tok) continue; strncpy(rc->host_ifaces[1], tok, sizeof(rc->host_ifaces[1]) - 1);
         tok = strtok_r(NULL, ", \t\r\n", &save); if (!tok) continue; strncpy(rc->router_ifaces[1], tok, sizeof(rc->router_ifaces[1]) - 1);
+#endif
         tok = strtok_r(NULL, ", \t\r\n", &save); if (!tok) continue; strncpy(ip, tok, sizeof(ip) - 1); ip[sizeof(ip) - 1] = '\0';
         if (inet_pton(AF_INET, ip, &rc->host_ip) != 1) continue;
         ++g_fabric.rank_count;
@@ -130,6 +132,10 @@ static int load_ranks(const char *path) {
 static void build_channels(void) {
     int responder;
     for (responder = 0; responder < g_fabric.rank_count && g_fabric.channel_count < MAX_CHANNELS; ++responder) {
+#if SUBCHANNEL_COUNT == 1
+        if (responder != 0) continue;
+#endif
+
         uint32_t requester_mask = neighbor_mask_of((uint32_t)responder);
         ArborChannelSpec *channel = &g_fabric.channels[g_fabric.channel_count++];
         int rank;

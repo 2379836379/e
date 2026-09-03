@@ -623,6 +623,7 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     trigger_bytes = (double)HDR_LEN + replay_bytes + request_bytes;
     if (!charge_repair_tokens(state, now, trigger_bytes)) return 0;
     g_responder_stats[e->subchannel_id].repair_trigger_sent++;
+    fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed);
     send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc);
     if (e->retry_count < 0xff) e->retry_count++;
     e->sent_at = now;
@@ -1151,6 +1152,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             if (from_repair) {
                 g_responder_stats[m.subchannel_id].repair_request_recv++;
                 accumulate_requester_input(e, req_mask, m.payload, m.payload_len, 1, 1);
+                fprintf(stderr, "[repair-request-rx] ch=%u sub=%u offset=%u src_rank=%d bitmap=0x%x expected=0x%x\n", channel_id, m.subchannel_id, local_credit_offset, rank_of_ip(m.src_ip), e->repair_bitmap, expected_requesters);
                 ready_bitmap = e->repair_bitmap;
                 accum_payload = (const uint8_t *)e->repair_accum;
                 completion_kind = COMPLETION_KIND_REPAIR;

@@ -16,7 +16,7 @@ TEST_SCRIPT_DIR = $(TEST_ROOT)/scripts
 TEST_DATA_DIR = $(TEST_ROOT)/data/current
 TEST_OUT_DIR = $(TEST_ROOT)/out
 
-.PHONY: all clean setup_env setup_topo clean_topo kill test_allreduce test test_allreduce_loss
+.PHONY: all clean setup_env setup_topo clean_topo kill test_allreduce test test_allreduce_loss test_allreduce_2star test_allreduce_loss_2star test_allreduce_loss_2star
 
 all: $(TARGET)
 
@@ -47,7 +47,6 @@ clean_topo:
 kill:
 	-@for c in $(ROUTERS) $(HOSTS); do docker exec $$c pkill -f $(TARGET) 2>/dev/null; done
 
-
 define run-allreduce
 	@bash $(TEST_SCRIPT_DIR)/run_allreduce_test.sh
 endef
@@ -58,4 +57,8 @@ test_allreduce: $(TARGET)
 test_allreduce_loss: $(TARGET)
 	bash $(TEST_SCRIPT_DIR)/run_allreduce_loss_test.sh
 
-test: test_allreduce
+test_allreduce_2star: $(TARGET)
+	bash $(TEST_SCRIPT_DIR)/run_allreduce_test_2star.sh
+
+test_allreduce_loss_2star: $(TARGET)
+	bash $(TEST_SCRIPT_DIR)/run_allreduce_loss_test_2star.sh

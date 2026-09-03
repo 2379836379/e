@@ -16,7 +16,9 @@
 #define MAX_GROUP_SIZE 8
 #define MAX_CONNS      32
 #define MAX_CHANNELS   8
+#ifndef SUBCHANNEL_COUNT
 #define SUBCHANNEL_COUNT 2
+#endif
 #define ARBOR_MAX_STACK_DEPTH 3
 
 #define WINDOW        32

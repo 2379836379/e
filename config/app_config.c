@@ -21,13 +21,19 @@ int lab_config_load(lab_config_t *config, const char *path) {
         char ip[32];
         if (line[0] == '#' || line[0] == '\n') continue;
         e = &config->entries[config->count];
+#if SUBCHANNEL_COUNT == 1
+        if (sscanf(line, "%d,%31[^,],%31[^,],%31[^,],%31s", &e->rank, e->host_name, e->host_ifaces[0], e->router_ifaces[0], ip) != 5) {
+            fprintf(stderr, "bad config line: %s", line);
+            continue;
+        }
+#else
         if (sscanf(line, "%d,%31[^,],%31[^,],%31[^,],%31[^,],%31[^,],%31s",
-                   &e->rank, e->host_name,
-                   e->host_ifaces[0], e->router_ifaces[0],
+                   &e->rank, e->host_name, e->host_ifaces[0], e->router_ifaces[0],
                    e->host_ifaces[1], e->router_ifaces[1], ip) != 7) {
             fprintf(stderr, "bad config line: %s", line);
             continue;
         }
+#endif
         if (inet_pton(AF_INET, ip, &e->host_ip) != 1) {
             fprintf(stderr, "bad ip: %s\n", ip);
             continue;
