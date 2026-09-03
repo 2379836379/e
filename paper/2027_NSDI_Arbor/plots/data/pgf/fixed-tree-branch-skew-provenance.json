@@ -1,0 +1,43 @@
+{
+  "aggregation": "three paired physical source leaves; arithmetic mean and Student-t 95% CI (df=2); target is a configured background cap and achieved acknowledged rate is reported separately; the motivation view divides fixed-gate bg150 state cost by fixed-gate bg0 state cost, with ratio CI equal to the bg150 CI divided by the zero-CI bg0 denominator",
+  "runtime_bundle": "/home/ruizhe/Workspace/arbor/simulation/reports/fixed-tree-branch-skew-runtime-bundle-v2.json",
+  "runtime_bundle_sha256": "0f1dfd7d61e1ce58066b574244b663b1d6c342a13156f6f6ed1786d7b7ff692c",
+  "runtime_common": {
+    "binary_sha256": "e441934328b20476d0236f07595c0f1c829ee7dbcd43b5c71d05884d7ee21a8f",
+    "runtime_bundle_sha256": "c947b30ed36f967b28c0bf80274d00fb0a422eba786bab3fffb40f29af2c4926",
+    "runtime_libraries": {
+      "libns3.39-applications-optimized.so": "3a8073e0716d2dae83462110a21102d767838b2e24d4f99fdd3207593ab1b6b2",
+      "libns3.39-arbor-optimized.so": "edd2af0e164f0c6a30fd56d60b0773a51203befad6e352c7f3dfdbd86e7349dd",
+      "libns3.39-bridge-optimized.so": "97469948df0712f64433e008045f0513c7bb71f1f48f86af5be0ffe933240f41",
+      "libns3.39-core-optimized.so": "edf7a3592fa3a941caeedae2678899a6b0103bf9470add0d922b7bfe13d596e4",
+      "libns3.39-internet-optimized.so": "e519433cc8fb2c749d1eea30138d0522e8b2a9f61896641a2c570299f6ffdc5e",
+      "libns3.39-network-optimized.so": "6a3517268ac7b3f7b96e9cf61d4f1c1b93878a6137357ef100efac80d9ade1b7",
+      "libns3.39-point-to-point-optimized.so": "319ea3031797241388a0569e1fc9a3a5ca471ed9a87c33e9f9ede3f98139198b",
+      "libns3.39-stats-optimized.so": "7e734feb76adeaca1ed6e0ab05d3af4365b01229d66290bb6f1a5757877742ce",
+      "libns3.39-traffic-control-optimized.so": "2f5d04749403f34bbc7d0fbf7524b86e3f425e42ca02aa3454065ebdef822400"
+    },
+    "source_sha256": "f5ce5917983df73eca26333ef90d197cd829ab51707e2eaa1b1965a74b7ea60e"
+  },
+  "source_audit": "/home/ruizhe/Workspace/arbor/simulation/reports/fixed-tree-branch-skew-formal-v2.json",
+  "source_audit_sha256": "b2790fad1faa9ae6195208c3af85afc58e3820a3be6567fa82f5d3e246f647d8",
+  "source_manifest": "/home/ruizhe/Workspace/arbor/simulation/l3/manifests/fixed-tree-branch-skew-formal-v2.jsonl",
+  "source_manifest_sha256": "22b16634e94827b4f24e34e9f63f743daa034de9ef75c74c287b34eca9b65207",
+  "status": "PASS",
+  "tables": {
+    "evaluation": {
+      "path": "../paper/nsdi/plots/data/pgf/fixed-tree-branch-skew.csv",
+      "rows": 12,
+      "sha256": "27bc6995c1809c26c38f9232a6b68d3ded29d2e0f69c78938c9563fa830ccd93"
+    },
+    "motivation": {
+      "path": "../paper/nsdi/plots/data/pgf/motivation-branch-skew.csv",
+      "rows": 2,
+      "sha256": "b3e40867d94b9b125dd3ba6e3d5f73c819a3b20da2da977e3ae1b5e73a6d03b6"
+    },
+    "plot": {
+      "path": "../paper/nsdi/plots/data/pgf/fixed-tree-branch-skew-plot.csv",
+      "rows": 4,
+      "sha256": "0327774786745b19fa18f3d11a0720f3e2283727f84fbd79af6614f097ebedf9"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+\begin{tikzpicture}
+\begin{axis}[
+  arbor axis,
+  width=0.96\linewidth,height=0.53\linewidth,
+  xmin=8,xmax=1024,ymin=0,ymax=70,
+  xtick={8,128,256,512,768,1024},
+  ytick={0,10,20,30,40,50,60,70},
+  xlabel={物理聚合器数 $A$},
+  ylabel={哈希冲突率（\%）},
+]
+\addplot[ArborOrange,thick,mark=*,mark size=1.0pt]
+  table[col sep=comma,x=physicalAggregators,y=atpHashCollisionPct]
+    {plots/data/pgf/motivation-atp-hash-collisions.csv};
+\end{axis}
+\end{tikzpicture}

@@ -1,0 +1,49 @@
+% Values are the five-process medians and full ranges from
+% plots/data/pgf/poller-scan.csv.
+\begin{tikzpicture}
+\begin{axis}[
+  arbor axis,
+  width=\linewidth,height=0.60\linewidth,
+  xmin=3,xmax=33,ymin=0,ymax=101,
+  xtick={4,8,16,20,32},
+  xlabel={全 job datapath poller 数},
+  ylabel={AllReduce goodput (Gbps)},
+  legend style={at={(0.98,0.04)},anchor=south east},
+]
+\addplot[ArborGray,dotted,forget plot] coordinates {(4,90) (32,90)};
+\addplot[ArborBlue,thick,mark=*,mark options={fill=ArborBlue},
+  error bars/.cd,y dir=both,y explicit]
+table[row sep=\\,x=pollers,y=median,
+  y error minus=minus,y error plus=plus] {
+pollers median minus plus\\
+4 46.588 0.056 0.023\\
+8 96.666 0.271 0.319\\
+16 97.501 0.026 0.023\\
+32 97.471 0.046 0.035\\
+};
+\addlegendentry{Arbor}
+\addplot[ArborOrange,thick,dashed,mark=square*,
+  mark options={fill=ArborOrange},error bars/.cd,y dir=both,y explicit]
+table[row sep=\\,x=pollers,y=median,
+  y error minus=minus,y error plus=plus] {
+pollers median minus plus\\
+4 36.391 0.025 0.020\\
+8 57.767 9.889 0.545\\
+16 87.758 3.735 0.822\\
+20 91.915 1.458 0.517\\
+32 94.961 1.259 0.389\\
+};
+\addlegendentry{ATP-8K}
+\addplot[ArborGreen,thick,dash dot,mark=triangle*,
+  mark options={fill=ArborGreen},error bars/.cd,y dir=both,y explicit]
+table[row sep=\\,x=pollers,y=median,
+  y error minus=minus,y error plus=plus] {
+pollers median minus plus\\
+4 29.987 0.021 0.035\\
+8 47.805 0.121 0.254\\
+16 56.731 4.356 1.023\\
+32 96.627 0.240 0.067\\
+};
+\addlegendentry{SwitchML-8K}
+\end{axis}
+\end{tikzpicture}

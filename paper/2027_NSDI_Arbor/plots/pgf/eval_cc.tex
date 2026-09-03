@@ -1,0 +1,76 @@
+\pgfplotstableread[col sep=comma]{plots/data/pgf/cc.csv}\ccfairdata
+
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=0.07\textwidth},
+  arbor axis,arbor panel,
+  width=0.44\textwidth,height=0.20\textwidth,
+  ymin=-0.5,ymax=3.5,y dir=reverse,
+  ytick={0,1,2,3},
+  yticklabels={Swift,Oscar,TIMELY,DCQCN-style},
+  yticklabel style={font=\scriptsize},
+  ymajorgrids=false,
+]
+\nextgroupplot[
+  title={(a) Fairness: Channel 1 share},
+  xmin=48,xmax=96,
+  xtick={50,60,70,80,90},
+  xlabel={Channel 1 share (\%)},
+  legend to name=ccfairlegend,
+  legend columns=2,
+  legend style={/tikz/every even column/.append style={column sep=7pt}},
+]
+\addplot[sharp plot,black,thin,densely dotted,mark=none,forget plot]
+  coordinates {(50,-0.5) (50,3.5)};
+\foreach \ccrow in {0,1,2,3}{
+  \pgfplotstablegetelem{\ccrow}{hiddenShare}\of\ccfairdata
+  \edef\cchidden{\pgfplotsretval}
+  \pgfplotstablegetelem{\ccrow}{visibleShare}\of\ccfairdata
+  \edef\ccvisible{\pgfplotsretval}
+  \edef\ccsegment{\noexpand\addplot[ArborGray!65,semithick,mark=none,
+    forget plot] coordinates {(\cchidden,\ccrow) (\ccvisible,\ccrow)};}
+  \ccsegment
+}
+\addplot[only marks,mark=*,ArborOrange,
+  error bars/.cd,x dir=both,x explicit]
+  table[x=hiddenShare,y=x,x error=hiddenShareCi] {\ccfairdata};
+\addlegendentry{$E$ filtered for Ch.~1}
+\addplot[only marks,mark=diamond,mark size=3pt,ArborBlue,
+  mark options={solid,fill=none},
+  error bars/.cd,x dir=both,x explicit]
+  table[x=visibleShare,y=x,x error=visibleShareCi] {\ccfairdata};
+\addlegendentry{$E$ observed by both}
+\pgfplotstablegetelem{0}{hiddenShare}\of\ccfairdata
+\edef\ccswiftshare{\pgfplotsretval}
+\node[font=\tiny,anchor=west,ArborOrange] at (axis cs:\ccswiftshare,0)
+  {\pgfmathprintnumber[fixed,precision=1]{\ccswiftshare}};
+
+\nextgroupplot[
+  title={(b) Efficiency: $E$ utilization},
+  xmin=90,xmax=100.8,
+  xtick={90,95,100},
+  xlabel={$E$ utilization (\%)},
+  yticklabels={,,,},
+]
+\addplot[sharp plot,black,thin,densely dotted,mark=none,forget plot]
+  coordinates {(100,-0.5) (100,3.5)};
+\foreach \ccrow in {0,1,2,3}{
+  \pgfplotstablegetelem{\ccrow}{hiddenUtil}\of\ccfairdata
+  \edef\cchidden{\pgfplotsretval}
+  \pgfplotstablegetelem{\ccrow}{visibleUtil}\of\ccfairdata
+  \edef\ccvisible{\pgfplotsretval}
+  \edef\ccsegment{\noexpand\addplot[ArborGray!65,semithick,mark=none,
+    forget plot] coordinates {(\cchidden,\ccrow) (\ccvisible,\ccrow)};}
+  \ccsegment
+}
+\addplot[only marks,mark=*,ArborOrange,
+  error bars/.cd,x dir=both,x explicit]
+  table[x=hiddenUtil,y=x,x error=hiddenUtilCi] {\ccfairdata};
+\addplot[only marks,mark=diamond,mark size=3pt,ArborBlue,
+  mark options={solid,fill=none},
+  error bars/.cd,x dir=both,x explicit]
+  table[x=visibleUtil,y=x,x error=visibleUtilCi] {\ccfairdata};
+\end{groupplot}
+\node[anchor=south,yshift=24pt] at (group c1r1.north east)
+  {\ref{ccfairlegend}};
+\end{tikzpicture}

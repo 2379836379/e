@@ -1,0 +1,39 @@
+\begin{abstract}
+
+Collective libraries expose increasingly programmable schedules, but execute
+them as point-to-point transfers. In-network aggregation must additionally
+preserve which inputs belong to one packet offset, which tree and aggregation
+state they share, and when the group completes or enters recovery. Existing
+systems reconstruct parts of this relation through data-plane hashing, switch
+transport endpoints, or control-plane allocation; path selection, aggregation
+state, congestion feedback, and recovery consequently operate at different
+boundaries.
+
+Arbor combines an aggregation-agnostic, feedback-gated packet-level path
+scheduler with a multicast-native transport abstraction. For each packet offset,
+the scheduler selects a preinstalled tree whose rate and window gates admit
+transmission. A multicast credit commits that choice to a stable requester group;
+its copies acquire per-switch slots along downstream branches, and requesters
+return branch-specific position stacks in the corresponding requests. Group
+completion updates subsequent path allocation, injection, and recovery. All jobs
+share one owner-tagged cyclic allocator per switch. For a shared cyclic
+allocator, we derive the exact minimum
+reuse depth and deployment bounds from its advance sequence and safe-release
+time. When provisioned at this depth, Arbor's in-band cyclic allocation exposes
+every address without a per-job or per-rank multiplier.
+
+We implement a DPDK host runtime and a parameterized aggregation RTL datapath.
+Packet-level simulations cover six collective primitives, multi-level aggregation, four endpoint
+congestion-control algorithms, failures, and multi-tenant workloads. Across 110
+state-sizing runs, measured reuse depth remains within the corresponding cyclic
+bound. On a fixed 6.4-Tbps spine with a 42-MiB empirical-p99 state budget, we
+increase the configured population from 16 to 512 while keeping about 75\%
+of the jobs communication-active. Relative to each point's topology-derived
+per-job service budget, Arbor sustains 97.42--97.98\%; statically partitioned
+SwitchML-like settles at 69.99--75.03\% after its partitions become binding,
+while ATP-like falls from 97.59\% to 40.50\% as hash collisions increase.
+
+% TODO(testbed-v80-final): Add only the final four-rank V80 FP32 throughput,
+% CPU-core, baseline, and resource result after the clean campaign is sealed.
+
+\end{abstract}

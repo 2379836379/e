@@ -1,0 +1,30 @@
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=1.4cm},
+  arbor axis,arbor panel,
+  width=7.75cm,height=3.9cm,
+]
+\nextgroupplot[
+  title={(a) Partially filled state},
+  xlabel={Credit skew ($\mu$s)},
+  ylabel={Partial slot-time (\%)},
+  xmin=-1,xmax=38,ymin=15,ymax=72,
+  xtick={0,4.5,9,18,36},
+]
+\addplot[ArborBlue,thick,mark=*]
+  table[col sep=comma,x=skew,y=partial]{plots/data/pgf/sync-skew.csv};
+
+\nextgroupplot[
+  title={(b) Throughput},
+  xlabel={Credit skew ($\mu$s)},
+  ylabel={Goodput (Gbps)},
+  xmin=-1,xmax=38,ymin=60,ymax=101.5,
+  xtick={0,4.5,9,18,36},
+]
+\addplot[ArborGray,dashed] coordinates {(-1,100) (38,100)};
+\addplot[ArborOrange,thick,mark=square*]
+  table[col sep=comma,x=skew,y=goodput]{plots/data/pgf/sync-skew.csv};
+\end{groupplot}
+\end{tikzpicture}%
+}

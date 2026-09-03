@@ -1,0 +1,38 @@
+\begin{tikzpicture}
+\begin{axis}[
+  arbor axis,arbor panel,
+  width=0.88\textwidth,height=0.30\textwidth,
+  xmin=0,xmax=51.2,ymin=0,ymax=1.25,
+  xtick={0,12.8,25.6,38.4,51.2},
+  xlabel={Time (ms)},
+  ylabel={Completed logical work (GiB)},
+  legend columns=3,
+  legend style={at={(0.5,1.02)},anchor=south,
+    /tikz/every even column/.append style={column sep=5pt}},
+]
+\path[fill=ArborBlue!4]
+  (axis cs:0,0) rectangle (axis cs:12.8,1.25);
+\path[fill=ArborGray!7]
+  (axis cs:12.8,0) rectangle (axis cs:25.6,1.25);
+\path[fill=ArborBlue!4]
+  (axis cs:25.6,0) rectangle (axis cs:38.4,1.25);
+\path[fill=ArborGray!7]
+  (axis cs:38.4,0) rectangle (axis cs:51.2,1.25);
+\node[font=\scriptsize,anchor=north] at (axis cs:6.4,1.24) {tree 0 slow};
+\node[font=\scriptsize,anchor=north] at (axis cs:19.2,1.24) {tree 1 slow};
+\node[font=\scriptsize,anchor=north] at (axis cs:32.0,1.24) {tree 2 slow};
+\node[font=\scriptsize,anchor=north] at (axis cs:44.8,1.24) {tree 3 slow};
+\addplot[black,thin,densely dotted,mark=none]
+  table[col sep=comma,x=timeMs,y=feasibleGiB]
+  {plots/data/pgf/g3-online-rotation-cumulative.csv};
+\addlegendentry{Feasible}
+\addplot[ArborGray,thick,dashed,mark=none]
+  table[col sep=comma,x=timeMs,y=fixedGiB]
+  {plots/data/pgf/g3-online-rotation-cumulative.csv};
+\addlegendentry{Fixed quota}
+\addplot[ArborBlue,thick,mark=none]
+  table[col sep=comma,x=timeMs,y=dynamicGiB]
+  {plots/data/pgf/g3-online-rotation-cumulative.csv};
+\addlegendentry{Dynamic}
+\end{axis}
+\end{tikzpicture}

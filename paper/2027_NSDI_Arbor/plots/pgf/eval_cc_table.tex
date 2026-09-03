@@ -1,0 +1,34 @@
+\pgfplotstabletypeset[
+  col sep=comma,
+  columns={controllerLabel,hiddenShare,visibleShare,
+    hiddenAggregateGbps,visibleAggregateGbps},
+  columns/controllerLabel/.style={
+    string type,column name={Controller},column type=l,
+  },
+  columns/hiddenShare/.style={
+    column name={One-sided feedback},
+    fixed,fixed zerofill,precision=2,column type=r,
+  },
+  columns/visibleShare/.style={
+    column name={Two-sided feedback},
+    fixed,fixed zerofill,precision=2,column type=r,
+  },
+  columns/hiddenAggregateGbps/.style={
+    column name={One-sided feedback},
+    fixed,fixed zerofill,precision=1,column type=r,
+  },
+  columns/visibleAggregateGbps/.style={
+    column name={Two-sided feedback},
+    fixed,fixed zerofill,precision=1,column type=r,
+  },
+  every head row/.style={
+    before row={
+      \toprule
+      & \multicolumn{2}{c}{Channel~1 share of completed goodput (\%)}
+      & \multicolumn{2}{c}{Aggregate completed goodput (Gbps)}\\
+      \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    },
+    after row=\midrule,
+  },
+  every last row/.style={after row=\bottomrule},
+]{plots/data/pgf/cc.csv}

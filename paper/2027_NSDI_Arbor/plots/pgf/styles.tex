@@ -1,0 +1,27 @@
+\definecolor{ArborBlue}{HTML}{0072B2}
+\definecolor{ArborSky}{HTML}{56B4E9}
+\definecolor{ArborOrange}{HTML}{D55E00}
+\definecolor{ArborGreen}{HTML}{009E73}
+\definecolor{ArborPurple}{HTML}{CC79A7}
+\definecolor{ArborGray}{HTML}{666666}
+\definecolor{ArborLightGray}{HTML}{D9D9D9}
+
+\pgfplotsset{
+  arbor axis/.style={
+    grid=major,
+    major grid style={draw=black!12,line width=0.25pt},
+    axis line style={draw=black!70,line width=0.4pt},
+    tick style={draw=black!70,line width=0.4pt},
+    tick align=outside,
+    tick label style={font=\scriptsize},
+    label style={font=\small},
+    legend style={font=\scriptsize,draw=none,fill=none},
+    line width=0.8pt,
+    mark size=2pt,
+    clip=false,
+    scaled ticks=false,
+  },
+  arbor panel/.style={
+    title style={font=\bfseries\scriptsize,at={(axis description cs:0,1.04)},anchor=south west},
+  },
+}

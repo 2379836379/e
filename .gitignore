@@ -3,8 +3,8 @@ tests/out/
 *.o
 build
 
-*.data
+# *.data
 *.log
-paper
+# paper
 
 

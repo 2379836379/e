@@ -1,0 +1,62 @@
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1,horizontal sep=0.075\textwidth},
+  arbor axis,arbor panel,
+  width=0.46\textwidth,height=0.29\textwidth,
+  xmin=-5,xmax=155,
+  xtick={0,50,100,150},
+  xlabel={Background rate cap (Gbps)},
+]
+\nextgroupplot[
+  title={(a) Intra-tree arrival skew},
+  ymin=0,ymax=270,
+  ytick={0,50,100,150,200,250},
+  ylabel={p99 arrival span (\textmu s)},
+  legend to name=branchskewlegend,
+  legend columns=3,
+  legend style={/tikz/every even column/.append style={column sep=4pt}},
+]
+\addplot[ArborGray,thick,dashed,mark=triangle*,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=backgroundCapGbps,y=fixedBranchSpanP99Us,
+    y error=fixedBranchSpanP99UsCi]
+    {plots/data/pgf/fixed-tree-branch-skew-plot.csv};
+\addlegendentry{Fixed gate}
+\addplot[ArborOrange,thick,dash dot,mark=square*,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=backgroundCapGbps,y=dcqcnBranchSpanP99Us,
+    y error=dcqcnBranchSpanP99UsCi]
+    {plots/data/pgf/fixed-tree-branch-skew-plot.csv};
+\addlegendentry{Group-OR ECN}
+\addplot[ArborBlue,thick,mark=*,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=backgroundCapGbps,y=swiftBranchSpanP99Us,
+    y error=swiftBranchSpanP99UsCi]
+    {plots/data/pgf/fixed-tree-branch-skew-plot.csv};
+\addlegendentry{Group completion}
+
+\nextgroupplot[
+  title={(b) Exact allocator depth},
+  ymin=0,ymax=750,
+  ytick={0,150,300,450,600,750},
+  ylabel={Required slots},
+]
+\addplot[ArborGray,thick,dashed,mark=triangle*,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=backgroundCapGbps,y=fixedRequiredDepthSlots,
+    y error=fixedRequiredDepthSlotsCi]
+    {plots/data/pgf/fixed-tree-branch-skew-plot.csv};
+\addplot[ArborOrange,thick,dash dot,mark=square*,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=backgroundCapGbps,y=dcqcnRequiredDepthSlots,
+    y error=dcqcnRequiredDepthSlotsCi]
+    {plots/data/pgf/fixed-tree-branch-skew-plot.csv};
+\addplot[ArborBlue,thick,mark=*,
+  error bars/.cd,y dir=both,y explicit]
+  table[col sep=comma,x=backgroundCapGbps,y=swiftRequiredDepthSlots,
+    y error=swiftRequiredDepthSlotsCi]
+    {plots/data/pgf/fixed-tree-branch-skew-plot.csv};
+\end{groupplot}
+\node[anchor=south,yshift=26pt] at (group c1r1.north east)
+  {\ref{branchskewlegend}};
+\end{tikzpicture}
