@@ -26,6 +26,9 @@ typedef struct {
 static net_device_t g_devs[16];
 static int g_dev_count = 0;
 static int g_dev_rr = 0;
+#ifdef ARBOR_TEST_DROP_NORMAL_REQUEST
+static int g_test_dropped_normal_request = 0;
+#endif
 static agtr_t *g_agtr = NULL;
 static router_slot_t g_slots[AGTR_ARRAY_SIZE];
 static const ArborRouterNodeConfig *g_router_topology = NULL;
@@ -121,8 +124,12 @@ static void inject_on_port(const char *out_port, const uint8_t *frame, int len, 
             int rc = pcap_inject(tx, frame, len);
             if (rc == len) ++g_devs[i].tx_packets;
             if (rc != len) {
+                int frame_repair = 0;
+                if (len >= HDR_LEN) {
+                    frame_repair = arbor_get_repair(arbor_load_byte0(frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t)));
+                }
                 fprintf(stderr,
-                        "[router-inject-error] router=%s out=%s dst_rank=%d sub=%u len=%d rc=%d err=%s\n",
+                        frame_repair ? "[router-repair-inject-error] router=%s out=%s dst_rank=%d sub=%u len=%d rc=%d err=%s\n" : "[router-inject-error] router=%s out=%s dst_rank=%d sub=%u len=%d rc=%d err=%s\n",
                         g_router_topology ? ArborRouterNodeName(g_router_topology) : "?", out_port,
                         rank, subchannel_id, len, rc, pcap_geterr(tx));
             }
@@ -341,11 +348,16 @@ static void router_multicast_response(const uint8_t *frame, int len, const char 
         memcpy(local_frame, tmp_frame, (size_t)len);
         out_hdr = arbor_parse_header(local_frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t));
         fprintf(stderr,
-                "[router-response-down] router=%s out=%s responder_rank=%d sub=%u msg=%u credit_valid=%u completion_valid=%u credit_off=%u payload_off=%u depth=%u\n",
+                "[router-response-down] router=%s out=%s responder_rank=%d sub=%u msg=%u repair=%u credit_valid=%u completion_valid=%u credit_off=%u payload_off=%u depth=%u\n",
                 g_router_topology ? ArborRouterNodeName(g_router_topology) : "?",
                 out_port, responder_rank, subchannel_id, (unsigned)out_hdr.message_id,
-                out_hdr.credit_valid ? 1u : 0u, out_hdr.payload_valid ? 1u : 0u,
+                out_hdr.repair ? 1u : 0u, out_hdr.credit_valid ? 1u : 0u, out_hdr.payload_valid ? 1u : 0u,
                 out_hdr.offset_b, out_hdr.offset_a, out_hdr.agg_depth);
+        if (out_hdr.repair) {
+            fprintf(stderr, "[router-repair-forward] router=%s out=%s responder_rank=%d sub=%u offset=%u\n",
+                    ArborRouterNodeName(g_router_topology), out_port, responder_rank,
+                    subchannel_id, out_hdr.offset_b);
+        }
         inject_on_port(out_port, local_frame, len, -1, subchannel_id);
     }
 }
@@ -741,6 +753,14 @@ void INC(void) {
                                        subchannel_id, ip->dst_ip);
             continue;
         }
+#ifdef ARBOR_TEST_DROP_NORMAL_REQUEST
+        if (!g_test_dropped_normal_request && !hdr.repair &&
+            hdr.offset_a == 0 && rank_of_ip(ip->src_ip) == 1 && rank_of_ip(ip->dst_ip) == 0) {
+            g_test_dropped_normal_request = 1;
+            fprintf(stderr, "[test-drop-normal-request] ch=0 offset=0 src_rank=1 dst_rank=0\n");
+            continue;
+        }
+#endif
 
         fprintf(stderr,
                 "[router-request-in] router=%s in=%s src_rank=%d dst_rank=%d sub=%u msg=%u depth=%u aggregated=%u req_off=%u merged=%u payload_valid=%u payload_kind=%u payload_len=%u\n",

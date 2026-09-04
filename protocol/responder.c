@@ -943,7 +943,13 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                         ? response_message_by_id(channel_id, register_message_id[0])->registered_bitmap[0] : 0,
                     response_message_by_id(channel_id, register_message_id[0]) && register_message_id_valid[0]
                         ? response_message_by_id(channel_id, register_message_id[0])->registered_ready_mask : 0,
-                    done_count, total_npkts, end_ack_mask[0], end_ack_mask[1]);
+                    done_count, total_npkts, end_ack_mask[0],
+#if SUBCHANNEL_COUNT > 1
+                    end_ack_mask[1]
+#else
+                    0u
+#endif
+                    );
             next_progress_log = loop_now + 1000000ULL;
         }
         for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
@@ -975,7 +981,13 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                             ? response_message_by_id(channel_id, register_message_id[0])->registered_bitmap[0] : 0,
                         response_message_by_id(channel_id, register_message_id[0]) && register_message_id_valid[0]
                             ? response_message_by_id(channel_id, register_message_id[0])->registered_ready_mask : 0,
-                        done_count, total_npkts, end_ack_mask[0], end_ack_mask[1]);
+                        done_count, total_npkts, end_ack_mask[0],
+#if SUBCHANNEL_COUNT > 1
+                    end_ack_mask[1]
+#else
+                    0u
+#endif
+                    );
                 next_progress_log = now + 1000000ULL;
             }
 

@@ -369,7 +369,7 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                     if (completed[local_credit_offset]) {
                         continue;
                     }
-                    if (st->occupied && st->offset == local_credit_offset &&
+                    if (!repair_valid && st->occupied && st->offset == local_credit_offset &&
                         (st->normal_credit_pending || st->request_sent)) {
                         continue;
                     }
@@ -426,7 +426,12 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
             fprintf(stderr, "[requester-progress] ch=%u msg=%u reg_mask=0x%x failed=0x%x completed=%u/%u end_seen=0x%x end_ack=0x%x\n",
                     channel_id, msg->message_id, msg->register_acked_mask,
                     msg->register_failed_mask, completed_count, total_npkts,
-                    end_seen[0] | (uint8_t)(end_seen[1] << 1), msg->end_ack_mask);
+#if SUBCHANNEL_COUNT > 1
+                    end_seen[0] | (uint8_t)(end_seen[1] << 1),
+#else
+                    end_seen[0],
+#endif
+                    msg->end_ack_mask);
             next_progress_log = now + 1000000ULL;
         }
         for (uint32_t scan = 0; scan < SUBCHANNEL_COUNT; ++scan) {
