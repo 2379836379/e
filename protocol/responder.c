@@ -325,7 +325,32 @@ static void replay_primary_response(const credit_entry_t *e) {
     emit_primary_response(e, ARBOR_PAYLOAD_REPLAY);
 }
 
-static credit_entry_t *find_replay_predecessor(credit_entry_t *entries, uint32_t successor_credit_offset) { if (!entries || successor_credit_offset == INVALID_OFFSET) return NULL; for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) { credit_entry_t *prev = &entries[i]; if (prev->valid && prev->tail_response_valid && prev->tail_successor_credit_offset == successor_credit_offset) return prev; } return NULL; }
+static credit_entry_t *find_replay_predecessor(credit_entry_t *entries,
+                                               uint32_t successor_credit_offset) {
+    if (!entries || successor_credit_offset == INVALID_OFFSET) return NULL;
+
+    /* Prefer the explicit successor link recorded when the response committed. */
+    for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) {
+        credit_entry_t *prev = &entries[i];
+        if (prev->valid && prev->tail_response_valid &&
+            prev->tail_successor_credit_offset == successor_credit_offset) {
+            return prev;
+        }
+    }
+
+    /* A successor may have been reserved before its predecessor committed. */
+    if (successor_credit_offset > 0) {
+        uint32_t predecessor_offset = successor_credit_offset - 1u;
+        for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) {
+            credit_entry_t *prev = &entries[i];
+            if (prev->valid && prev->committed && prev->tail_response_valid &&
+                prev->credit_offset == predecessor_offset) {
+                return prev;
+            }
+        }
+    }
+    return NULL;
+}
 
 
 static void send_repair_trigger(uint32_t channel_id, uint32_t subchannel_id,
@@ -618,6 +643,7 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     now = now_us();
     state = find_channel_state(channel_id);
     replay_entry = find_replay_predecessor(entries, e->credit_offset); replay_bytes = replay_entry ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
+    fprintf(stderr, "[repair-replay-lookup] ch=%u sub=%u repair_off=%u predecessor=%s prev_off=%u prev_tail_successor=%u prev_payload_off=%u prev_primary_valid=%u replay_len=%u\n", channel_id, e->subchannel_id, e->credit_offset, replay_entry ? "found" : "none", replay_entry ? replay_entry->credit_offset : INVALID_OFFSET, replay_entry ? replay_entry->tail_successor_credit_offset : INVALID_OFFSET, replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET, replay_entry ? replay_entry->primary_response.valid : 0, replay_entry ? PAYLOAD_LEN : 0);
     request_bytes = (double)expected_requester_count * (double)(PAYLOAD_LEN + HDR_LEN);
     trigger_bytes = (double)HDR_LEN + replay_bytes + request_bytes;
     if (!charge_repair_tokens(state, now, trigger_bytes)) return 0;
