@@ -112,6 +112,7 @@ typedef struct {
     uint8_t completion_kind;
     uint8_t ce_seen;
     uint8_t repair_mode;
+    uint8_t repair_replay_valid;
 
     uint32_t credit_offset;
     uint32_t local_credit_offset;
@@ -324,16 +325,19 @@ static void replay_primary_response(const credit_entry_t *e) {
     emit_primary_response(e, ARBOR_PAYLOAD_REPLAY);
 }
 
+static credit_entry_t *find_replay_predecessor(credit_entry_t *entries, uint32_t successor_credit_offset) { if (!entries || successor_credit_offset == INVALID_OFFSET) return NULL; for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) { credit_entry_t *prev = &entries[i]; if (prev->valid && prev->tail_response_valid && prev->tail_successor_credit_offset == successor_credit_offset) return prev; } return NULL; }
+
+
 static void send_repair_trigger(uint32_t channel_id, uint32_t subchannel_id,
-                                uint32_t credit_offset, uint32_t agg_loc) {
+                                uint32_t credit_offset, uint32_t agg_loc,
+                                uint32_t replay_payload_offset, const uint8_t *replay_payload, uint16_t replay_len) {
     for (int i = 0; i < g_n; i++) {
         uint32_t dst_ip = g_cfg[i].host_ip;
-        if (dst_ip == g_my_ip) continue;
         (void)agg_loc;
         send_response_frame(dst_ip, 0, channel_id, subchannel_id,
-                            credit_offset, INVALID_OFFSET, agg_loc,
-                            0, 0, 0, NULL, 0, 0,
-                            ARBOR_PAYLOAD_COMPLETION, 1);
+                            credit_offset, replay_payload_offset, agg_loc,
+                            0, 0, 0, replay_payload, replay_len, 0,
+                            ARBOR_PAYLOAD_REPLAY, 1);
     }
 }
 
@@ -415,14 +419,8 @@ static void send_end_all(uint32_t channel_id, const uint8_t *register_message_id
     }
 }
 
-static int all_registered_subchannels_acked(uint32_t expected_requesters,
-                                            const uint32_t *end_ack_mask,
-                                            const uint8_t *register_message_id_valid) {
-    for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
-        if (register_message_id_valid && !register_message_id_valid[s]) continue;
-        if (end_ack_mask[s] != expected_requesters) return 0;
-    }
-    return 1;
+static int all_registered_subchannels_acked(uint32_t expected_requesters, uint32_t end_ack_mask) {
+    return end_ack_mask == expected_requesters;
 }
 
 static uint32_t requester_mask_from_ip(uint32_t ip) {
@@ -607,24 +605,29 @@ static void commit_primary_response(credit_entry_t *e, void *buf, uint32_t credi
 }
 
 static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
-                            uint32_t expected_requester_count, credit_entry_t *e) {
+                            uint32_t expected_requester_count, credit_entry_t *entries, credit_entry_t *e) {
     host_channel_state_t *state;
     uint64_t now;
     double replay_bytes;
     double request_bytes;
     double trigger_bytes;
+    credit_entry_t *replay_entry;
     if (!e || e->committed || e->done) return 0;
     if (e->subchannel_id >= SUBCHANNEL_COUNT) e->subchannel_id = subchannel_id;
     if (!e->repair_mode) e->repair_mode = 1;
     now = now_us();
     state = find_channel_state(channel_id);
-    replay_bytes = e->bound_payload_valid ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
+    replay_entry = find_replay_predecessor(entries, e->credit_offset); replay_bytes = replay_entry ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
     request_bytes = (double)expected_requester_count * (double)(PAYLOAD_LEN + HDR_LEN);
     trigger_bytes = (double)HDR_LEN + replay_bytes + request_bytes;
     if (!charge_repair_tokens(state, now, trigger_bytes)) return 0;
     g_responder_stats[e->subchannel_id].repair_trigger_sent++;
     fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed);
-    send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc);
+    send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc,
+                        replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET,
+                        replay_entry ? replay_entry->result : NULL,
+                        replay_entry ? PAYLOAD_LEN : 0);
+    e->repair_replay_valid = replay_entry != NULL;
     if (e->retry_count < 0xff) e->retry_count++;
     e->sent_at = now;
     return 1;
@@ -661,7 +664,7 @@ static int reserve_credit(uint32_t channel_id, protocol_message_t *meta, uint32_
         e->retry_count = 0;
         e->tail_response_valid = 0;
         e->tail_response_acked = 0;
-        e->tail_successor_credit_offset = INVALID_OFFSET;
+            e->tail_successor_credit_offset = INVALID_OFFSET;
         e->bound_payload_offset = INVALID_OFFSET;
         e->subchannel_id = subchannel_id;
         e->agg_loc = 0;
@@ -778,12 +781,8 @@ static void maybe_timeout_repair(uint32_t channel_id, uint32_t subchannel_id,
         if (!e->valid || e->sent_at == 0) continue;
         if (e->subchannel_id != subchannel_id) continue;
         if (now - e->sent_at < RTO_US) continue;
-        if (e->bound_payload_valid) {
-            note_non_sample_completion(e, COMPLETION_KIND_REPLAY);
-            replay_bound_payload_response(e, channel_id, subchannel_id, fanin);
-        }
         if (!e->committed) {
-            (void)try_enter_repair(channel_id, subchannel_id, expected_requester_count, e);
+            (void)try_enter_repair(channel_id, subchannel_id, expected_requester_count, entries, e);
         }
     }
 }
@@ -923,32 +922,26 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
     }
 
     uint32_t done_count = 0;
-    uint32_t end_ack_mask[SUBCHANNEL_COUNT] = {0};
+    uint32_t end_ack_mask = 0;
     uint8_t end_sent = 0;
     uint64_t end_sent_at = 0;
     uint64_t next_progress_log = 0;
 
     while (done_count < total_npkts ||
-           !all_registered_subchannels_acked(expected_requesters, end_ack_mask,
-                                             register_message_id_valid)) {
+           !all_registered_subchannels_acked(expected_requesters, end_ack_mask)) {
         rx_msg_t m;
         conn_t *cn = &g_conns[ctx->recv_conn];
         int popped_any = 0;
         uint64_t loop_now = now_us();
         if (loop_now >= next_progress_log) {
             fprintf(stderr,
-                    "[responder-progress] ch=%u registered=0x%x ready=0x%x done=%u/%u end_ack0=0x%x end_ack1=0x%x\n",
+                    "[responder-progress] ch=%u registered=0x%x ready=0x%x done=%u/%u end_ack=0x%x\n",
                     channel_id,
                     response_message_by_id(channel_id, register_message_id[0]) && register_message_id_valid[0]
                         ? response_message_by_id(channel_id, register_message_id[0])->registered_bitmap[0] : 0,
                     response_message_by_id(channel_id, register_message_id[0]) && register_message_id_valid[0]
                         ? response_message_by_id(channel_id, register_message_id[0])->registered_ready_mask : 0,
-                    done_count, total_npkts, end_ack_mask[0],
-#if SUBCHANNEL_COUNT > 1
-                    end_ack_mask[1]
-#else
-                    0u
-#endif
+                    done_count, total_npkts, end_ack_mask
                     );
             next_progress_log = loop_now + 1000000ULL;
         }
@@ -956,8 +949,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count);
         }
         issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
-        if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask,
-                                                          register_message_id_valid) && end_sent_at != 0 &&
+        if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask) && end_sent_at != 0 &&
             loop_now - end_sent_at >= RTO_US) {
             if (charge_repair_tokens(state, loop_now, (double)HDR_LEN * SUBCHANNEL_COUNT)) {
                 replay_tail_responses(channel_id, fanin, entries);
@@ -975,18 +967,13 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             uint64_t now = now_us();
             if (now >= next_progress_log) {
                 fprintf(stderr,
-                        "[responder-progress] ch=%u registered=0x%x ready=0x%x done=%u/%u end_ack0=0x%x end_ack1=0x%x\n",
+                        "[responder-progress] ch=%u registered=0x%x ready=0x%x done=%u/%u end_ack=0x%x\n",
                         channel_id,
                         response_message_by_id(channel_id, register_message_id[0]) && register_message_id_valid[0]
                             ? response_message_by_id(channel_id, register_message_id[0])->registered_bitmap[0] : 0,
                         response_message_by_id(channel_id, register_message_id[0]) && register_message_id_valid[0]
                             ? response_message_by_id(channel_id, register_message_id[0])->registered_ready_mask : 0,
-                        done_count, total_npkts, end_ack_mask[0],
-#if SUBCHANNEL_COUNT > 1
-                    end_ack_mask[1]
-#else
-                    0u
-#endif
+                        done_count, total_npkts, end_ack_mask
                     );
                 next_progress_log = now + 1000000ULL;
             }
@@ -996,8 +983,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             }
             issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
 
-            if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask,
-                                                              register_message_id_valid) && end_sent_at != 0 &&
+            if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask) && end_sent_at != 0 &&
                 now - end_sent_at >= RTO_US) {
                 if (charge_repair_tokens(state, now, (double)HDR_LEN * SUBCHANNEL_COUNT)) {
                     replay_tail_responses(channel_id, fanin, entries);
@@ -1029,19 +1015,17 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                 e->sample_eligible = 0;
                 e->credit_offset = responder_local_to_wire(meta->epoch, local_credit_offset);
                 e->subchannel_id = m.subchannel_id;
-                (void)try_enter_repair(channel_id, m.subchannel_id, expected_requester_count, e);
+                (void)try_enter_repair(channel_id, m.subchannel_id, expected_requester_count, entries, e);
                 continue;
             }
 
             if (m.msg_type == ARBOR_MSG_END_ACK) {
                 protocol_message_t *ack_meta = response_message_by_id(channel_id, m.message_id);
                 if (m.subchannel_id < SUBCHANNEL_COUNT && ack_meta && ack_meta->in_use &&
-                    (!register_message_id_valid[m.subchannel_id] ||
-                     m.message_id == register_message_id[m.subchannel_id]) &&
                     m.payload_offset == ack_meta->epoch) {
-                    ack_meta->responder_end_ack_mask[m.subchannel_id] |= requester_mask_from_ip(m.src_ip);
-                    end_ack_mask[m.subchannel_id] = ack_meta->responder_end_ack_mask[m.subchannel_id];
-                    if (ack_meta->responder_end_ack_mask[m.subchannel_id] == expected_requesters) {
+                    ack_meta->responder_end_ack_mask |= requester_mask_from_ip(m.src_ip);
+                    end_ack_mask = ack_meta->responder_end_ack_mask;
+                    if (ack_meta->responder_end_ack_mask == expected_requesters) {
                         ack_meta->sequence_reserved = 0;
                         ack_meta->reuse_ready = 1;
                     }
@@ -1139,13 +1123,6 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                 continue;
             }
 
-            for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; i++) {
-                credit_entry_t *prev = &entries[i];
-                if (!prev->valid || !prev->tail_response_valid || prev->tail_response_acked) continue;
-                if (prev->tail_successor_credit_offset != m.credit_offset) continue;
-                prev->tail_response_acked = 1;
-            }
-
             uint32_t req_mask = requester_mask_from_ip(m.src_ip);
             const int allow_normal_single = expected_requester_count <= 1;
             const int from_repair = (m.msg_type == ARBOR_MSG_REPAIR_REQUEST);
@@ -1203,6 +1180,13 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                                           &credit_gap_us[m.subchannel_id],
                                           &credit_window[m.subchannel_id], &done_count,
                                           completion_kind, 0)) {
+                    if (!from_repair || e->bound_payload_valid) {
+                        for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) {
+                            credit_entry_t *prev = &entries[i];
+                            if (!prev->valid || !prev->tail_response_valid || prev->tail_response_acked) continue;
+                            if (prev->tail_successor_credit_offset == m.credit_offset) prev->tail_response_acked = 1;
+                        }
+                    }
                     issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
                 }
             }

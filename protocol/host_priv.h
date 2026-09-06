@@ -51,7 +51,7 @@ typedef struct {
     void *dst_buffer;
     uint8_t register_acked_mask;
     uint8_t register_failed_mask;
-    uint8_t end_ack_mask;
+    uint8_t end_ack_sent;
     uint8_t end_pending;
     uint8_t reuse_ready;
     uint8_t complete;
@@ -62,7 +62,7 @@ typedef struct {
     uint8_t register_ack_pending;
     uint32_t next_credit_offset;
     uint32_t registered_bitmap[SUBCHANNEL_COUNT];
-    uint32_t responder_end_ack_mask[SUBCHANNEL_COUNT];
+    uint32_t responder_end_ack_mask;
     uint32_t end_ack_epoch;
     uint8_t end_ack_epoch_valid;
     uint32_t register_attempts[SUBCHANNEL_COUNT];
