@@ -642,8 +642,10 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     if (!e->repair_mode) e->repair_mode = 1;
     now = now_us();
     state = find_channel_state(channel_id);
-    replay_entry = find_replay_predecessor(entries, e->credit_offset); replay_bytes = replay_entry ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
-    fprintf(stderr, "[repair-replay-lookup] ch=%u sub=%u repair_off=%u predecessor=%s prev_off=%u prev_tail_successor=%u prev_payload_off=%u prev_primary_valid=%u replay_len=%u\n", channel_id, e->subchannel_id, e->credit_offset, replay_entry ? "found" : "none", replay_entry ? replay_entry->credit_offset : INVALID_OFFSET, replay_entry ? replay_entry->tail_successor_credit_offset : INVALID_OFFSET, replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET, replay_entry ? replay_entry->primary_response.valid : 0, replay_entry ? PAYLOAD_LEN : 0);
+    replay_entry = find_replay_predecessor(entries, e->credit_offset);
+    if (e->bound_payload_valid) replay_entry = find_entry(entries, e->bound_payload_offset);
+    replay_bytes = (e->bound_payload_valid || replay_entry) ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
+    fprintf(stderr, "[repair-replay-lookup] ch=%u sub=%u repair_off=%u predecessor=%s prev_off=%u prev_tail_successor=%u prev_payload_off=%u prev_primary_valid=%u replay_len=%u\n", channel_id, e->subchannel_id, e->credit_offset, replay_entry ? "found" : "none", replay_entry ? replay_entry->credit_offset : INVALID_OFFSET, replay_entry ? replay_entry->tail_successor_credit_offset : INVALID_OFFSET, e->bound_payload_valid ? e->bound_payload_offset : (replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET), replay_entry ? replay_entry->primary_response.valid : 0, e->bound_payload_valid || replay_entry ? PAYLOAD_LEN : 0);
     request_bytes = (double)expected_requester_count * (double)(PAYLOAD_LEN + HDR_LEN);
     trigger_bytes = (double)HDR_LEN + replay_bytes + request_bytes;
     if (!charge_repair_tokens(state, now, trigger_bytes)) return 0;
@@ -651,8 +653,8 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed);
     send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc,
                         replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET,
-                        replay_entry ? replay_entry->result : NULL,
-                        replay_entry ? PAYLOAD_LEN : 0);
+                        e->bound_payload_valid ? e->bound_payload : (replay_entry ? replay_entry->result : NULL),
+                        e->bound_payload_valid || replay_entry ? PAYLOAD_LEN : 0);
     e->repair_replay_valid = replay_entry != NULL;
     if (e->retry_count < 0xff) e->retry_count++;
     e->sent_at = now;
@@ -849,7 +851,21 @@ static int commit_entry_response(uint32_t channel_id, uint32_t subchannel_id,
                             channel_id, subchannel_id, response_credit_offset,
                             responder_local_to_wire(msg_meta->epoch, e->payload_offset),
                             response_agg_loc, response_agg_level, response_agg_valid, fanin);
-    if (reserved_entry) memcpy(reserved_entry->bound_payload, e->result, PAYLOAD_LEN);
+    /* Bind the completed response to the already-issued successor credit. */
+    credit_entry_t *bound_successor = reserved_entry;
+    if (!bound_successor && e->credit_offset != INVALID_OFFSET) {
+        bound_successor = find_entry(entries, e->credit_offset + 1u);
+        if (bound_successor && !bound_successor->credit_sent) bound_successor = NULL;
+    }
+    if (bound_successor) {
+        bound_successor->bound_payload_valid = 1;
+        bound_successor->bound_payload_offset = responder_local_to_wire(msg_meta->epoch, e->payload_offset);
+        memcpy(bound_successor->bound_payload, e->result, PAYLOAD_LEN);
+    }
+    if (bound_successor && bound_successor != e && bound_successor->repair_mode && !bound_successor->done) {
+        fprintf(stderr, "[repair-replay-refresh] ch=%u sub=%u successor_off=%u payload_off=%u\n", channel_id, bound_successor->subchannel_id, bound_successor->credit_offset, bound_successor->bound_payload_offset);
+        (void)try_enter_repair(channel_id, bound_successor->subchannel_id, expected_requesters, entries, bound_successor);
+    }
     if (allow_sample) {
         if (note_normal_path_sample(e)) {
             responder_rate_sample_t sample;
