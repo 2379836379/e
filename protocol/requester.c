@@ -287,6 +287,7 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
     uint32_t completed_count = 0;
     uint8_t end_seen = 0;
     uint8_t end_ack_pending = 0;
+    uint8_t end_ack_subchannels = 0;
     uint64_t done_since = 0;
     uint64_t last_end_seen_at = 0;
     uint64_t next_progress_log = 0;
@@ -402,16 +403,15 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                 if (m.subchannel_id < SUBCHANNEL_COUNT &&
                     m.message_id == msg->message_id &&
                     m.payload_offset == msg->epoch) {
-                    end_seen = 1;
+                    end_seen |= (uint8_t)(1u << m.subchannel_id);
                     end_ack_pending = 1;
+                    end_ack_subchannels |= (uint8_t)(1u << m.subchannel_id);
                     msg->end_pending = 1;
                     last_end_seen_at = now_us();
                 } else if (state->request_end_tombstone_valid[m.message_id] &&
                            state->request_end_tombstone_seq[m.message_id] == m.payload_offset) {
-                    for (uint32_t sidx = 0; sidx < SUBCHANNEL_COUNT; ++sidx) {
-                        send_end_ack(ctx->local_ip, ctx->responder_ip, channel_id, sidx,
-                                     m.message_id, m.payload_offset);
-                    }
+                    send_end_ack(ctx->local_ip, ctx->responder_ip, channel_id,
+                                 m.subchannel_id, m.message_id, m.payload_offset);
                     progressed = 1;
                 }
                 progressed = 1;
@@ -482,9 +482,12 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
             if (done_since == 0) done_since = now_us();
             if (end_ack_pending) {
                 for (uint32_t sidx = 0; sidx < SUBCHANNEL_COUNT; ++sidx) {
-                    send_end_ack(ctx->local_ip, ctx->responder_ip, channel_id, sidx, msg->message_id, msg->epoch);
+                    if (end_ack_subchannels & (uint8_t)(1u << sidx))
+                        send_end_ack(ctx->local_ip, ctx->responder_ip, channel_id,
+                                     sidx, msg->message_id, msg->epoch);
                 }
                 end_ack_pending = 0;
+                end_ack_subchannels = 0;
                 msg->end_ack_sent = 1;
                 msg->end_ack_epoch = msg->epoch;
                 msg->end_ack_epoch_valid = 1;

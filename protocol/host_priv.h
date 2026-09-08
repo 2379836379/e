@@ -89,6 +89,10 @@ typedef struct {
     uint64_t response_next_channel_credit_at;
     double response_repair_tokens;
     uint64_t response_repair_refill_at;
+    uint32_t pending_response_offsets[256];
+    uint8_t pending_response_message_ids[256];
+    uint32_t pending_response_head;
+    uint32_t pending_response_tail;
     uint32_t request_end_tombstone_seq[MAX_ACTIVE_MESSAGES];
     uint8_t request_end_tombstone_valid[MAX_ACTIVE_MESSAGES];
 } host_channel_state_t;

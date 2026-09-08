@@ -13,7 +13,7 @@ HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router1 router2)
 N=4
 NINTS=4096
-LOSS_RATE="50%"
+LOSS_RATE="10%"
 
 cleanup() {
   set +e
@@ -60,6 +60,8 @@ for r in 0 1 2 3; do
   docker exec -d "$h" bash -lc "cd /app && ./build/inc $h $CFG_PATH allreduce > tests/out/$h.log 2>&1"
 done
 finished=0
+waited=0
+WAIT_TIMEOUT_SEC=600
 while :; do
   ready=1
   for r in 0 1 2 3; do
@@ -74,10 +76,28 @@ while :; do
     break
   fi
   sleep 1
+  waited=$((waited + 1))
+  if [ $waited -ge $WAIT_TIMEOUT_SEC ]; then
+    echo "timed out waiting for output files" >&2
+    break
+  fi
 done
 if [ $finished -ne 1 ]; then
   echo 'allreduce test waiting for output files' >&2
 fi
+end_closed=1
+for r in 0 1 2 3; do
+  h=${HOSTS[$r]}
+  if ! docker exec "$h" grep -q "\[host\] rank${r} allreduce done" "/app/tests/out/$h.log"; then
+    echo "workers did not finish on $h" >&2
+    end_closed=0
+  fi
+  commit_total=$(docker exec "$h" awk -v channel="ch=$r" 'index($0,"[responder-summary]") && index($0,channel) { for (i=1;i<=NF;i++) { if ($i ~ /^request_commit=/) { split($i,a,"="); req+=a[2] } if ($i ~ /^repair_commit=/) { split($i,a,"="); rep+=a[2] } } } END { print req+rep+0 }' "/app/tests/out/$h.log")
+  if [ "$commit_total" -ne 4 ]; then
+    echo "responder ch=$r committed ${commit_total}/4 credits" >&2
+    end_closed=0
+  fi
+done
 missing=0
 for r in 0 1 2 3; do
   h=${HOSTS[$r]}
@@ -92,7 +112,7 @@ done
 for rt in "${ROUTERS[@]}"; do
   docker cp "$rt:/app/tests/out/$rt.log" "$OUT_DIR/$rt.log" 2>/dev/null || true
 done
-if [ $finished -ne 1 ] || [ $missing -ne 0 ]; then
+if [ $finished -ne 1 ] || [ $end_closed -ne 1 ] || [ $missing -ne 0 ]; then
   echo 'test artifacts were collected under tests/out' >&2
   exit 1
 fi

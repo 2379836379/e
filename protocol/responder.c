@@ -130,6 +130,7 @@ typedef struct {
     uint32_t direct_contrib_count;
     uint32_t repair_contrib_count;
     uint32_t bound_payload_offset;
+    uint32_t bound_by_credit_offset;
     uint8_t result[PAYLOAD_LEN];
     uint8_t bound_payload[PAYLOAD_LEN];
     primary_response_t primary_response;
@@ -337,18 +338,7 @@ static credit_entry_t *find_replay_predecessor(credit_entry_t *entries,
             return prev;
         }
     }
-
-    /* A successor may have been reserved before its predecessor committed. */
-    if (successor_credit_offset > 0) {
-        uint32_t predecessor_offset = successor_credit_offset - 1u;
-        for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) {
-            credit_entry_t *prev = &entries[i];
-            if (prev->valid && prev->committed && prev->tail_response_valid &&
-                prev->credit_offset == predecessor_offset) {
-                return prev;
-            }
-        }
-    }
+ 
     return NULL;
 }
 
@@ -439,6 +429,7 @@ static void send_end_all(uint32_t channel_id, const uint8_t *register_message_id
             if (register_message_id_valid && register_message_id_valid[s]) {
                 arbor_store_message_id(frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t), register_message_id[s]);
             }
+            fprintf(stderr, "[end-tx] ch=%u sub=%u dst_rank=%d msg=%u epoch=%u\n", channel_id, s, rank_of_ip(dst_ip), register_message_id_valid && register_message_id_valid[s] ? register_message_id[s] : 0, register_epoch_valid && register_epoch_valid[s] ? register_epoch[s] : 0);
             (void)enqueue_send_frame(s, frame, (uint32_t)len, 0);
         }
     }
@@ -625,8 +616,6 @@ static void commit_primary_response(credit_entry_t *e, void *buf, uint32_t credi
                            agg_level, agg_valid, fanin, result_buf, PAYLOAD_LEN);
     e->committed = 1;
     e->tail_response_valid = 1;
-    e->tail_response_acked = 0;
-    e->tail_successor_credit_offset = response_credit_offset;
 }
 
 static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
@@ -636,15 +625,38 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     double replay_bytes;
     double request_bytes;
     double trigger_bytes;
-    credit_entry_t *replay_entry;
-    if (!e || e->committed || e->done) return 0;
+    credit_entry_t *replay_entry = NULL;
+    uint32_t replay_offset = INVALID_OFFSET;
+    const uint8_t *replay_data = NULL;
+    uint8_t replay_valid = 0;
+    if (!e || e->done) return 0;
     if (e->subchannel_id >= SUBCHANNEL_COUNT) e->subchannel_id = subchannel_id;
     if (!e->repair_mode) e->repair_mode = 1;
     now = now_us();
     state = find_channel_state(channel_id);
-    replay_entry = find_replay_predecessor(entries, e->credit_offset);
-    if (e->bound_payload_valid) replay_entry = find_entry(entries, e->bound_payload_offset);
-    replay_bytes = (e->bound_payload_valid || replay_entry) ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
+    if (e->bound_payload_valid) {
+        replay_offset = e->bound_payload_offset;
+        replay_data = e->bound_payload;
+        replay_valid = 1;
+    }
+    if (!replay_valid) {
+        replay_entry = find_replay_predecessor(entries, e->credit_offset);
+        if (replay_entry && replay_entry->primary_response.valid) {
+            replay_offset = replay_entry->primary_response.payload_offset;
+            replay_data = replay_entry->primary_response.payload;
+            replay_valid = 1;
+        }
+    }
+    replay_entry = replay_valid ? (replay_entry ? replay_entry : find_entry(entries, replay_offset)) : NULL;
+    if (replay_valid && (!replay_entry || !replay_entry->valid || !replay_entry->primary_response.valid)) {
+        e->bound_payload_valid = 0;
+        e->bound_payload_offset = INVALID_OFFSET;
+        replay_valid = 0;
+        replay_offset = INVALID_OFFSET;
+        replay_data = NULL;
+        replay_entry = NULL;
+    }
+    replay_bytes = replay_valid ? (double)(PAYLOAD_LEN + HDR_LEN) : 0.0;
     fprintf(stderr, "[repair-replay-lookup] ch=%u sub=%u repair_off=%u predecessor=%s prev_off=%u prev_tail_successor=%u prev_payload_off=%u prev_primary_valid=%u replay_len=%u\n", channel_id, e->subchannel_id, e->credit_offset, replay_entry ? "found" : "none", replay_entry ? replay_entry->credit_offset : INVALID_OFFSET, replay_entry ? replay_entry->tail_successor_credit_offset : INVALID_OFFSET, e->bound_payload_valid ? e->bound_payload_offset : (replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET), replay_entry ? replay_entry->primary_response.valid : 0, e->bound_payload_valid || replay_entry ? PAYLOAD_LEN : 0);
     request_bytes = (double)expected_requester_count * (double)(PAYLOAD_LEN + HDR_LEN);
     trigger_bytes = (double)HDR_LEN + replay_bytes + request_bytes;
@@ -652,10 +664,10 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     g_responder_stats[e->subchannel_id].repair_trigger_sent++;
     fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed);
     send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc,
-                        replay_entry ? replay_entry->primary_response.payload_offset : INVALID_OFFSET,
-                        e->bound_payload_valid ? e->bound_payload : (replay_entry ? replay_entry->result : NULL),
-                        e->bound_payload_valid || replay_entry ? PAYLOAD_LEN : 0);
-    e->repair_replay_valid = replay_entry != NULL;
+                        replay_valid ? replay_offset : INVALID_OFFSET,
+                        replay_valid ? replay_data : NULL,
+                        replay_valid ? PAYLOAD_LEN : 0);
+    e->repair_replay_valid = replay_valid;
     if (e->retry_count < 0xff) e->retry_count++;
     e->sent_at = now;
     return 1;
@@ -691,9 +703,9 @@ static int reserve_credit(uint32_t channel_id, protocol_message_t *meta, uint32_
         e->bound_payload_valid = 0;
         e->retry_count = 0;
         e->tail_response_valid = 0;
-        e->tail_response_acked = 0;
-            e->tail_successor_credit_offset = INVALID_OFFSET;
         e->bound_payload_offset = INVALID_OFFSET;
+        e->bound_by_credit_offset = INVALID_OFFSET;
+        e->tail_successor_credit_offset = INVALID_OFFSET;
         e->subchannel_id = subchannel_id;
         e->agg_loc = 0;
         e->local_credit_offset = local_credit_offset;
@@ -753,9 +765,41 @@ static void replay_tail_responses(uint32_t channel_id, uint16_t fanin,
                                   credit_entry_t *entries) {
     for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; i++) {
         credit_entry_t *e = &entries[i];
-        if (!e->valid || !e->tail_response_valid || e->tail_response_acked || e->subchannel_id >= SUBCHANNEL_COUNT) continue;
+        if (!e->valid || !e->tail_response_valid || e->bound_by_credit_offset != INVALID_OFFSET || e->subchannel_id >= SUBCHANNEL_COUNT) continue;
         note_non_sample_completion(e, COMPLETION_KIND_REPLAY);
         replay_completion_response(e, channel_id, e->subchannel_id, fanin);
+    }
+}
+
+static void pending_response_push(host_channel_state_t *state, uint8_t message_id, uint32_t payload_offset) {
+    if (!state) return;
+    if (state->pending_response_tail - state->pending_response_head >= 256u) return;
+    uint32_t pos = state->pending_response_tail++ % 256u;
+    state->pending_response_offsets[pos] = payload_offset;
+    state->pending_response_message_ids[pos] = message_id;
+}
+
+static int pending_response_pop(host_channel_state_t *state, uint8_t *message_id, uint32_t *payload_offset) {
+    if (!state || state->pending_response_head == state->pending_response_tail) return 0;
+    uint32_t pos = state->pending_response_head++ % 256u;
+    if (message_id) *message_id = state->pending_response_message_ids[pos];
+    if (payload_offset) *payload_offset = state->pending_response_offsets[pos];
+    return 1;
+}
+
+static void flush_pending_responses(uint32_t channel_id, uint16_t fanin,
+                                     credit_entry_t *entries) {
+    host_channel_state_t *state = find_channel_state(channel_id);
+    uint8_t message_id;
+    uint32_t payload_offset;
+    while (pending_response_pop(state, &message_id, &payload_offset)) {
+        credit_entry_t *e = find_entry(entries, payload_offset);
+        if (!e || !e->primary_response.valid || e->bound_by_credit_offset != INVALID_OFFSET)
+            continue;
+        (void)message_id;
+        note_non_sample_completion(e, COMPLETION_KIND_REPLAY);
+        replay_completion_response(e, channel_id, e->subchannel_id, fanin);
+        e->completion_sent = 1;
     }
 }
 
@@ -768,16 +812,35 @@ static int maybe_issue_credits(uint32_t channel_id, protocol_message_t *meta,
     uint32_t agg_loc;
     uint16_t agg_level;
     uint8_t agg_valid;
+    credit_entry_t *reserved = NULL;
+    host_channel_state_t *state = find_channel_state(channel_id);
 
     if (!reserve_credit(channel_id, meta, subchannel_id, entries, next_credit_at,
                         credit_gap_us, credit_window,
-                        NULL, &credit_offset, &agg_loc, &agg_level, &agg_valid)) return 0;
+                        &reserved, &credit_offset, &agg_loc, &agg_level, &agg_valid)) return 0;
 
-    broadcast_response(meta->message_id, channel_id, subchannel_id,
-                       credit_offset,
-                       INVALID_OFFSET, agg_loc,
-                       agg_level, agg_valid, fanin, NULL, 0, next_credit_at ? *next_credit_at : 0,
-                       ARBOR_PAYLOAD_COMPLETION, 0);
+    uint8_t pending_mid;
+    uint32_t pending_off;
+    int bound = 0;
+    if (reserved && pending_response_pop(state, &pending_mid, &pending_off)) {
+        credit_entry_t *payload_entry = find_entry(entries, pending_off);
+        if (payload_entry && payload_entry->primary_response.valid &&
+            payload_entry->bound_by_credit_offset == INVALID_OFFSET) {
+            reserved->bound_payload_valid = 1;
+            reserved->bound_payload_offset = pending_off;
+            memcpy(reserved->bound_payload, payload_entry->result, PAYLOAD_LEN);
+            payload_entry->bound_by_credit_offset = credit_offset;
+            payload_entry->tail_successor_credit_offset = credit_offset;
+            payload_entry->primary_response.credit_offset = credit_offset;
+            emit_primary_response(payload_entry, ARBOR_PAYLOAD_COMPLETION);
+            payload_entry->completion_sent = 1;
+
+            bound = 1;
+        }
+    }
+    if (!bound) {
+        broadcast_response(meta->message_id, channel_id, subchannel_id, credit_offset, INVALID_OFFSET, agg_loc, agg_level, agg_valid, fanin, NULL, 0, next_credit_at ? *next_credit_at : 0, ARBOR_PAYLOAD_COMPLETION, 0);
+    }
     note_registration_credit_sent(meta, subchannel_id);
     return 1;
 }
@@ -809,9 +872,7 @@ static void maybe_timeout_repair(uint32_t channel_id, uint32_t subchannel_id,
         if (!e->valid || e->sent_at == 0) continue;
         if (e->subchannel_id != subchannel_id) continue;
         if (now - e->sent_at < RTO_US) continue;
-        if (!e->committed) {
-            (void)try_enter_repair(channel_id, subchannel_id, expected_requester_count, entries, e);
-        }
+        (void)try_enter_repair(channel_id, subchannel_id, expected_requester_count, entries, e);
     }
 }
 
@@ -827,22 +888,6 @@ static int commit_entry_response(uint32_t channel_id, uint32_t subchannel_id,
     uint32_t response_agg_loc = e->agg_loc;
     uint16_t response_agg_level = 0;
     uint8_t response_agg_valid = 0;
-    credit_entry_t *reserved_entry = NULL;
-    if (!e || !msg_meta || e->committed) return 0;
-    if ((e->requester_bitmap & expected_requesters) != expected_requesters) return 0;
-    if (!e->completion_sent && message_subchannel_ready(msg_meta, subchannel_id)) {
-        (void)reserve_credit(channel_id, msg_meta, subchannel_id, entries,
-                             next_credit_at,
-                             credit_gap_us ? *credit_gap_us : fixed_credit_gap_us(),
-                             credit_window ? *credit_window : FIXED_STARTUP_WINDOW, &reserved_entry,
-                             &response_credit_offset, &response_agg_loc,
-                             &response_agg_level, &response_agg_valid);
-        if (reserved_entry) {
-            reserved_entry->bound_payload_valid = 1;
-            reserved_entry->bound_payload_offset =
-                responder_local_to_wire(msg_meta->epoch, e->payload_offset);
-        }
-    }
     if (response_credit_offset != INVALID_OFFSET) {
         response_credit_offset = responder_local_to_wire(msg_meta->epoch,
                                                          response_credit_offset);
@@ -852,20 +897,6 @@ static int commit_entry_response(uint32_t channel_id, uint32_t subchannel_id,
                             responder_local_to_wire(msg_meta->epoch, e->payload_offset),
                             response_agg_loc, response_agg_level, response_agg_valid, fanin);
     /* Bind the completed response to the already-issued successor credit. */
-    credit_entry_t *bound_successor = reserved_entry;
-    if (!bound_successor && e->credit_offset != INVALID_OFFSET) {
-        bound_successor = find_entry(entries, e->credit_offset + 1u);
-        if (bound_successor && !bound_successor->credit_sent) bound_successor = NULL;
-    }
-    if (bound_successor) {
-        bound_successor->bound_payload_valid = 1;
-        bound_successor->bound_payload_offset = responder_local_to_wire(msg_meta->epoch, e->payload_offset);
-        memcpy(bound_successor->bound_payload, e->result, PAYLOAD_LEN);
-    }
-    if (bound_successor && bound_successor != e && bound_successor->repair_mode && !bound_successor->done) {
-        fprintf(stderr, "[repair-replay-refresh] ch=%u sub=%u successor_off=%u payload_off=%u\n", channel_id, bound_successor->subchannel_id, bound_successor->credit_offset, bound_successor->bound_payload_offset);
-        (void)try_enter_repair(channel_id, bound_successor->subchannel_id, expected_requesters, entries, bound_successor);
-    }
     if (allow_sample) {
         if (note_normal_path_sample(e)) {
             responder_rate_sample_t sample;
@@ -876,11 +907,8 @@ static int commit_entry_response(uint32_t channel_id, uint32_t subchannel_id,
     } else {
         note_non_sample_completion(e, completion_kind);
     }
-    if (!e->completion_sent) {
-        g_responder_stats[subchannel_id].completion_sent++;
-        emit_primary_response(e, ARBOR_PAYLOAD_COMPLETION);
-        e->completion_sent = 1;
-    }
+    { host_channel_state_t *pending_state = find_channel_state(channel_id); pending_response_push(pending_state, msg_meta->message_id, e->credit_offset); }
+    /* Response is sent by IssueCredits (piggyback) or flush_pending_responses. */
     (void)mark_entry_done(channel_id, e, expected_requesters, done_count);
     return 1;
 }
@@ -991,13 +1019,15 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count);
         }
         issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
+        flush_pending_responses(channel_id, fanin, entries);
         if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask) && end_sent_at != 0 &&
             loop_now - end_sent_at >= RTO_US) {
-            if (charge_repair_tokens(state, loop_now, (double)HDR_LEN * SUBCHANNEL_COUNT)) {
-                replay_tail_responses(channel_id, fanin, entries);
-                send_end_all(channel_id, register_message_id, register_message_id_valid,
-                             register_epoch, register_epoch_valid);
-            }
+            /* END is control traffic: keep retrying it even when replay
+             * repair budget is exhausted. The reference implementation
+             * schedules the next END timeout unconditionally. */
+            replay_tail_responses(channel_id, fanin, entries);
+            send_end_all(channel_id, register_message_id, register_message_id_valid,
+                         register_epoch, register_epoch_valid);
             end_sent_at = loop_now;
         }
         flush_register_acks(channel_id, register_message_id, register_message_id_valid,
@@ -1027,11 +1057,10 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
 
             if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask) && end_sent_at != 0 &&
                 now - end_sent_at >= RTO_US) {
-                if (charge_repair_tokens(state, now, (double)HDR_LEN * SUBCHANNEL_COUNT)) {
-                    replay_tail_responses(channel_id, fanin, entries);
-                    send_end_all(channel_id, register_message_id, register_message_id_valid,
-                                 register_epoch, register_epoch_valid);
-                }
+                /* END retry is unconditional; replay budget must not suppress it. */
+                replay_tail_responses(channel_id, fanin, entries);
+                send_end_all(channel_id, register_message_id, register_message_id_valid,
+                             register_epoch, register_epoch_valid);
                 end_sent_at = now;
             }
             flush_register_acks(channel_id, register_message_id, register_message_id_valid,
@@ -1222,13 +1251,6 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                                           &credit_gap_us[m.subchannel_id],
                                           &credit_window[m.subchannel_id], &done_count,
                                           completion_kind, 0)) {
-                    if (!from_repair || e->bound_payload_valid) {
-                        for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; ++i) {
-                            credit_entry_t *prev = &entries[i];
-                            if (!prev->valid || !prev->tail_response_valid || prev->tail_response_acked) continue;
-                            if (prev->tail_successor_credit_offset == m.credit_offset) prev->tail_response_acked = 1;
-                        }
-                    }
                     issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
                 }
             }
