@@ -13,7 +13,7 @@ HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router1 router2)
 N=4
 NINTS=4096
-LOSS_RATE="0%"
+LOSS_RATE="10%"
 
 cleanup() {
   set +e
@@ -30,14 +30,7 @@ mkdir -p "$OUT_DIR" "$DATA_DIR"
 cd "$ROOT"
 rm -f "$DATA_DIR"/input-*.data "$DATA_DIR"/expected-allreduce.data
 rm -f "$OUT_DIR"/output-*.data "$OUT_DIR"/*.log
-if [ ! -s "$BIN" ] || [ ! -x "$BIN" ]; then
-  rm -f "$BIN"
-  make -C "$ROOT" >/dev/null
-fi
-if [ ! -s "$BIN" ] || [ ! -x "$BIN" ]; then
-  echo "invalid executable: $BIN" >&2
-  exit 1
-fi
+make -C "$ROOT" >/dev/null
 bash "$SCRIPT_DIR/helper.sh" gen "$N" "$NINTS"
 bash "$SCRIPT_DIR/helper.sh" sum "$N"
 bash "$ROOT/topology/star/setup.sh" clean >/dev/null 2>&1 || true
