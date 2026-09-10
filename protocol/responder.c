@@ -662,7 +662,7 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     trigger_bytes = (double)HDR_LEN + replay_bytes + request_bytes;
     if (!charge_repair_tokens(state, now, trigger_bytes)) return 0;
     g_responder_stats[e->subchannel_id].repair_trigger_sent++;
-    fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed);
+    fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u replay_payload_off=%u replay_len=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed, replay_valid ? replay_offset : INVALID_OFFSET, replay_valid ? PAYLOAD_LEN : 0);
     send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc,
                         replay_valid ? replay_offset : INVALID_OFFSET,
                         replay_valid ? replay_data : NULL,
@@ -766,6 +766,7 @@ static void replay_tail_responses(uint32_t channel_id, uint16_t fanin,
     for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; i++) {
         credit_entry_t *e = &entries[i];
         if (!e->valid || !e->tail_response_valid || e->bound_by_credit_offset != INVALID_OFFSET || e->subchannel_id >= SUBCHANNEL_COUNT) continue;
+        fprintf(stderr, "[end-replay-tx] ch=%u sub=%u payload_off=%u bound=%u\n", channel_id, e->subchannel_id, e->primary_response.payload_offset, e->bound_by_credit_offset != INVALID_OFFSET);
         note_non_sample_completion(e, COMPLETION_KIND_REPLAY);
         replay_completion_response(e, channel_id, e->subchannel_id, fanin);
     }
@@ -833,6 +834,7 @@ static int maybe_issue_credits(uint32_t channel_id, protocol_message_t *meta,
             payload_entry->tail_successor_credit_offset = credit_offset;
             payload_entry->primary_response.credit_offset = credit_offset;
             emit_primary_response(payload_entry, ARBOR_PAYLOAD_COMPLETION);
+            fprintf(stderr, "[response-bind] ch=%u sub=%u payload_off=%u successor_credit=%u\n", channel_id, payload_entry->subchannel_id, pending_off, credit_offset);
             payload_entry->completion_sent = 1;
 
             bound = 1;

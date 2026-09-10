@@ -327,9 +327,11 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                 const uint8_t credit_valid = (m.flags & ARBOR_FLAG_CREDIT_VALID) != 0;
                 const uint8_t repair_valid = m.repair != 0;
                 fprintf(stderr,
-                        "[response-rx] ch=%u sub=%u msg=%u credit_valid=%u repair=%u completion_valid=%u credit_off=%u payload_off=%u src_rank=%d\n",
+                        "[response-rx] ch=%u sub=%u msg=%u credit_valid=%u repair=%u payload_kind=%u delivery=%s completion_valid=%u credit_off=%u payload_off=%u src_rank=%d\n",
                         channel_id, m.subchannel_id, m.message_id,
-                        (unsigned)credit_valid, (unsigned)repair_valid, (unsigned)completion_valid,
+                        (unsigned)credit_valid, (unsigned)repair_valid, (unsigned)m.payload_kind,
+                        (repair_valid ? "REPAIR_REPLAY" : (m.payload_kind == ARBOR_PAYLOAD_REPLAY ? "END_REPLAY" : "NORMAL")),
+                        (unsigned)completion_valid,
                         m.credit_offset, m.payload_offset, rank_of_ip(m.src_ip));
                 stats[m.subchannel_id].response_recv++;
                 if (completion_valid && m.payload_len > 0) {

@@ -19,6 +19,7 @@ typedef struct {
     uint8_t msg_type;
     uint8_t flags;
     uint8_t repair;
+    uint8_t payload_kind;
     uint8_t message_id;
     uint8_t reserved2;
     uint32_t src_ip;

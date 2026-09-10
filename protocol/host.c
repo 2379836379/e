@@ -401,6 +401,7 @@ static void *host_rx_thread(void *arg) {
             m->msg_type = legacy_msg_type;
             m->flags = ARBOR_FLAG_VALID;
             m->repair = hdrv.repair ? 1u : 0u;
+            m->payload_kind = (uint8_t)hdrv.payload_kind;
             m->message_id = hdrv.message_id;
             if ((ip->tos & ARBOR_IPV4_ECN_MASK) == ARBOR_IPV4_ECN_CE) m->flags |= ARBOR_FLAG_ECN;
             if (hdrv.credit_valid) m->flags |= ARBOR_FLAG_CREDIT_VALID;
