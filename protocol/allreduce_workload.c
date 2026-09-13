@@ -156,6 +156,10 @@ int lab_run_host_allreduce(const lab_config_t *config, const char *host_name,
         pthread_join(tids[channel_id], NULL);
     }
 
+    /* Keep the host control plane alive to answer retransmitted END packets
+     * after requester workers have released their request messages. */
+    host_wait_for_end_quiet();
+
     write_output(config_path, rank, dst, nints);
     printf("[host] rank%d allreduce done (%u channels, %u packets total, concurrent)\n",
            rank, config->count, total_npkts);

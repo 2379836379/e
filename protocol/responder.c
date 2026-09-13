@@ -197,20 +197,52 @@ static int enqueue_send_frame(uint32_t subchannel_id, const uint8_t *frame, uint
 static void flush_send_queue(void) {
     uint64_t now = now_us();
     pthread_mutex_lock(&g_responder_sendq_lock);
-    while (g_responder_sendq_tail != g_responder_sendq_head) {
-        responder_sendq_entry_t *e = &g_responder_sendq[g_responder_sendq_tail];
-        if (!e->valid) {
-            g_responder_sendq_tail = (g_responder_sendq_tail + 1) % RESPONDER_SENDQ_SIZE;
-            continue;
+    /* Do not let a paced normal response at the ring head hold back a
+     * later repair or END frame.  The reference scheduler treats each
+     * transmission as an independent event; preserve FIFO only among frames
+     * that are already due. */
+    for (;;) {
+        int sent_due = 0;
+        uint32_t idx = g_responder_sendq_tail;
+        while (idx != g_responder_sendq_head) {
+            responder_sendq_entry_t *e = &g_responder_sendq[idx];
+            if (e->valid && e->due_at <= now) {
+                if (e->subchannel_id < SUBCHANNEL_COUNT && e->frame_len > 0) {
+                    host_inject_on_subchannel(e->subchannel_id, e->frame, (int)e->frame_len);
+                }
+                e->valid = 0;
+                e->frame_len = 0;
+                e->due_at = 0;
+                sent_due = 1;
+            }
+            idx = (idx + 1) % RESPONDER_SENDQ_SIZE;
         }
-        if (e->due_at > now) break;
-        if (e->subchannel_id < SUBCHANNEL_COUNT && e->frame_len > 0) {
-            host_inject_on_subchannel(e->subchannel_id, e->frame, (int)e->frame_len);
+        /* Compact the remaining future-due entries so holes created by the
+         * out-of-order scan cannot consume ring capacity indefinitely. */
+        {
+            uint32_t write = g_responder_sendq_tail;
+            idx = g_responder_sendq_tail;
+            while (idx != g_responder_sendq_head) {
+                responder_sendq_entry_t *src = &g_responder_sendq[idx];
+                if (src->valid) {
+                    if (write != idx) {
+                        responder_sendq_entry_t tmp = *src;
+                        g_responder_sendq[write] = tmp;
+                        src->valid = 0;
+                    }
+                    write = (write + 1) % RESPONDER_SENDQ_SIZE;
+                }
+                idx = (idx + 1) % RESPONDER_SENDQ_SIZE;
+            }
+            g_responder_sendq_head = write;
         }
-        e->valid = 0;
-        e->frame_len = 0;
-        e->due_at = 0;
-        g_responder_sendq_tail = (g_responder_sendq_tail + 1) % RESPONDER_SENDQ_SIZE;
+        while (g_responder_sendq_tail != g_responder_sendq_head &&
+               !g_responder_sendq[g_responder_sendq_tail].valid) {
+            g_responder_sendq_tail =
+                (g_responder_sendq_tail + 1) % RESPONDER_SENDQ_SIZE;
+        }
+        if (!sent_due) break;
+        now = now_us();
     }
     pthread_mutex_unlock(&g_responder_sendq_lock);
 }
@@ -312,18 +344,31 @@ static void cache_primary_response(credit_entry_t *e, uint8_t message_id, uint32
     if (plen > 0 && payload) memcpy(pr->payload, payload, plen);
 }
 
-static void emit_primary_response(const credit_entry_t *e, arbor_payload_kind_t payload_kind) {
+static void emit_primary_response_on_subchannel(const credit_entry_t *e,
+                                                uint32_t subchannel_id,
+                                                uint32_t credit_offset,
+                                                arbor_payload_kind_t payload_kind,
+                                                uint8_t repair) {
     const primary_response_t *pr = &e->primary_response;
     if (!pr->valid) return;
-    broadcast_response(pr->message_id, pr->channel_id, pr->subchannel_id,
-                       pr->credit_offset, pr->payload_offset, pr->agg_loc,
+    broadcast_response(pr->message_id, pr->channel_id, subchannel_id,
+                       credit_offset, pr->payload_offset, pr->agg_loc,
                        pr->agg_level, pr->agg_valid, pr->fanin,
                        pr->payload_len > 0 ? pr->payload : NULL, pr->payload_len, 0,
-                       payload_kind, 0);
+                       payload_kind, repair);
+}
+
+static void emit_primary_response(const credit_entry_t *e, arbor_payload_kind_t payload_kind) {
+    if (!e || !e->primary_response.valid) return;
+    emit_primary_response_on_subchannel(e, e->primary_response.subchannel_id,
+                                        e->primary_response.credit_offset,
+                                        payload_kind, 0);
 }
 
 static void replay_primary_response(const credit_entry_t *e) {
-    emit_primary_response(e, ARBOR_PAYLOAD_REPLAY);
+    if (!e || !e->primary_response.valid) return;
+    emit_primary_response_on_subchannel(e, e->primary_response.subchannel_id,
+                                        INVALID_OFFSET, ARBOR_PAYLOAD_REPLAY, 1);
 }
 
 static credit_entry_t *find_replay_predecessor(credit_entry_t *entries,
@@ -344,12 +389,12 @@ static credit_entry_t *find_replay_predecessor(credit_entry_t *entries,
 
 
 static void send_repair_trigger(uint32_t channel_id, uint32_t subchannel_id,
-                                uint32_t credit_offset, uint32_t agg_loc,
+                                uint8_t message_id, uint32_t credit_offset, uint32_t agg_loc,
                                 uint32_t replay_payload_offset, const uint8_t *replay_payload, uint16_t replay_len) {
     for (int i = 0; i < g_n; i++) {
         uint32_t dst_ip = g_cfg[i].host_ip;
         (void)agg_loc;
-        send_response_frame(dst_ip, 0, channel_id, subchannel_id,
+        send_response_frame(dst_ip, message_id, channel_id, subchannel_id,
                             credit_offset, replay_payload_offset, agg_loc,
                             0, 0, 0, replay_payload, replay_len, 0,
                             ARBOR_PAYLOAD_REPLAY, 1);
@@ -663,7 +708,8 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     if (!charge_repair_tokens(state, now, trigger_bytes)) return 0;
     g_responder_stats[e->subchannel_id].repair_trigger_sent++;
     fprintf(stderr, "[repair-trigger-tx] ch=%u sub=%u offset=%u retry=%u bitmap=0x%x committed=%u\n", channel_id, e->subchannel_id, e->credit_offset, (unsigned)(e->retry_count + 1u), e->repair_bitmap, e->committed);
-    send_repair_trigger(channel_id, e->subchannel_id, e->credit_offset, e->agg_loc,
+    send_repair_trigger(channel_id, e->subchannel_id, e->owner_message_id,
+                        e->credit_offset, e->agg_loc,
                         replay_valid ? replay_offset : INVALID_OFFSET,
                         replay_valid ? replay_data : NULL,
                         replay_valid ? PAYLOAD_LEN : 0);
@@ -743,7 +789,7 @@ static void replay_bound_payload_response(const credit_entry_t *e, uint32_t chan
     broadcast_response(e->owner_message_id, channel_id, subchannel_id,
                        INVALID_OFFSET, e->bound_payload_offset, e->agg_loc,
                        0, 0, fanin, e->bound_payload, PAYLOAD_LEN, 0,
-                       ARBOR_PAYLOAD_REPLAY, 0);
+                       ARBOR_PAYLOAD_REPLAY, 1);
 }
 
 static int message_subchannel_ready(const protocol_message_t *meta, uint32_t subchannel_id) {
@@ -773,15 +819,19 @@ static void replay_tail_responses(uint32_t channel_id, uint16_t fanin,
 
 static void pending_response_push(host_channel_state_t *state, uint8_t message_id, uint32_t payload_offset) {
     if (!state) return;
-    if (state->pending_response_tail - state->pending_response_head >= 256u) return;
-    uint32_t pos = state->pending_response_tail++ % 256u;
+    if (state->pending_response_tail - state->pending_response_head >= PENDING_RESPONSE_QUEUE_SIZE) {
+        fprintf(stderr, "[responder-pending-response-full] payload offset=%u message=%u\n",
+                payload_offset, (unsigned)message_id);
+        return;
+    }
+    uint32_t pos = state->pending_response_tail++ % PENDING_RESPONSE_QUEUE_SIZE;
     state->pending_response_offsets[pos] = payload_offset;
     state->pending_response_message_ids[pos] = message_id;
 }
 
 static int pending_response_pop(host_channel_state_t *state, uint8_t *message_id, uint32_t *payload_offset) {
     if (!state || state->pending_response_head == state->pending_response_tail) return 0;
-    uint32_t pos = state->pending_response_head++ % 256u;
+    uint32_t pos = state->pending_response_head++ % PENDING_RESPONSE_QUEUE_SIZE;
     if (message_id) *message_id = state->pending_response_message_ids[pos];
     if (payload_offset) *payload_offset = state->pending_response_offsets[pos];
     return 1;
@@ -798,7 +848,9 @@ static void flush_pending_responses(uint32_t channel_id, uint16_t fanin,
             continue;
         (void)message_id;
         note_non_sample_completion(e, COMPLETION_KIND_REPLAY);
-        replay_completion_response(e, channel_id, e->subchannel_id, fanin);
+        emit_primary_response(e, e->primary_response.payload_len > 0
+                                  ? ARBOR_PAYLOAD_DATA
+                                  : ARBOR_PAYLOAD_COMPLETION);
         e->completion_sent = 1;
     }
 }
@@ -831,15 +883,24 @@ static int maybe_issue_credits(uint32_t channel_id, protocol_message_t *meta,
             memcpy(reserved->bound_payload, payload_entry->result, PAYLOAD_LEN);
             payload_entry->bound_by_credit_offset = credit_offset;
             payload_entry->tail_successor_credit_offset = credit_offset;
-            payload_entry->primary_response.credit_offset = credit_offset;
-            emit_primary_response(payload_entry, ARBOR_PAYLOAD_COMPLETION);
+            emit_primary_response_on_subchannel(payload_entry, subchannel_id,
+                                                credit_offset,
+                                                payload_entry->primary_response.payload_len > 0
+                                                    ? ARBOR_PAYLOAD_DATA
+                                                    : ARBOR_PAYLOAD_COMPLETION,
+                                                0);
             payload_entry->completion_sent = 1;
 
             bound = 1;
         }
     }
     if (!bound) {
-        broadcast_response(meta->message_id, channel_id, subchannel_id, credit_offset, INVALID_OFFSET, agg_loc, agg_level, agg_valid, fanin, NULL, 0, next_credit_at ? *next_credit_at : 0, ARBOR_PAYLOAD_COMPLETION, 0);
+        /* reserve_credit has already enforced pacing.  The credit itself is
+         * sent now; next_credit_at is the deadline for the following credit. */
+        broadcast_response(meta->message_id, channel_id, subchannel_id,
+                           credit_offset, INVALID_OFFSET, agg_loc, agg_level,
+                           agg_valid, fanin, NULL, 0, now_us(),
+                           ARBOR_PAYLOAD_COMPLETION, 0);
     }
     note_registration_credit_sent(meta, subchannel_id);
     return 1;
@@ -994,6 +1055,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
     uint32_t done_count = 0;
     uint32_t end_ack_mask = 0;
     uint8_t end_sent = 0;
+    uint32_t end_retries = 0;
     uint64_t end_sent_at = 0;
     uint64_t next_progress_log = 0;
 
@@ -1025,6 +1087,12 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             /* END is control traffic: keep retrying it even when replay
              * repair budget is exhausted. The reference implementation
              * schedules the next END timeout unconditionally. */
+            if (++end_retries > END_MAX_RETRIES) {
+                fprintf(stderr, "[responder-end-timeout] ch=%u retries=%u end_ack=0x%x expected=0x%x\n",
+                        channel_id, end_retries, end_ack_mask, expected_requesters);
+                free(entries);
+                return -1;
+            }
             replay_tail_responses(channel_id, fanin, entries);
             send_end_all(channel_id, register_message_id, register_message_id_valid,
                          register_epoch, register_epoch_valid);
@@ -1058,6 +1126,12 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             if (end_sent && !all_registered_subchannels_acked(expected_requesters, end_ack_mask) && end_sent_at != 0 &&
                 now - end_sent_at >= RTO_US) {
                 /* END retry is unconditional; replay budget must not suppress it. */
+                if (++end_retries > END_MAX_RETRIES) {
+                    fprintf(stderr, "[responder-end-timeout] ch=%u retries=%u end_ack=0x%x expected=0x%x\n",
+                            channel_id, end_retries, end_ack_mask, expected_requesters);
+                    free(entries);
+                    return -1;
+                }
                 replay_tail_responses(channel_id, fanin, entries);
                 send_end_all(channel_id, register_message_id, register_message_id_valid,
                              register_epoch, register_epoch_valid);

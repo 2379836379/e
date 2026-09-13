@@ -135,8 +135,6 @@ static int dequeue_credit_local(requester_credit_queue_t *q, credit *out) {
     return 0;
 }
 
-static int all_end_seen(const uint8_t end_seen) { return end_seen != 0; }
-
 static void dump_requester_stats(uint32_t channel_id, const requester_stats_t *stats) {
     for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
         fprintf(stderr,
@@ -288,8 +286,6 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
     uint8_t end_seen = 0;
     uint8_t end_ack_pending = 0;
     uint8_t end_ack_subchannels = 0;
-    uint64_t done_since = 0;
-    uint64_t last_end_seen_at = 0;
     uint64_t next_progress_log = 0;
     (void)op;
 
@@ -407,11 +403,9 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                     end_ack_pending = 1;
                     end_ack_subchannels |= (uint8_t)(1u << m.subchannel_id);
                     msg->end_pending = 1;
-                    last_end_seen_at = now_us();
-                } else if (state->request_end_tombstone_valid[m.message_id] &&
-                           state->request_end_tombstone_seq[m.message_id] == m.payload_offset) {
-                    send_end_ack(ctx->local_ip, ctx->responder_ip, channel_id,
-                                 m.subchannel_id, m.message_id, m.payload_offset);
+                } else if (host_ack_tombstoned_end(channel_id, m.subchannel_id,
+                                                   m.message_id, m.payload_offset,
+                                                   m.src_ip)) {
                     progressed = 1;
                 }
                 progressed = 1;
@@ -479,7 +473,6 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
         }
 
         if (completed_count >= total_npkts) {
-            if (done_since == 0) done_since = now_us();
             if (end_ack_pending) {
                 for (uint32_t sidx = 0; sidx < SUBCHANNEL_COUNT; ++sidx) {
                     if (end_ack_subchannels & (uint8_t)(1u << sidx))
@@ -492,23 +485,11 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                 msg->end_ack_epoch = msg->epoch;
                 msg->end_ack_epoch_valid = 1;
                 msg->sequence_reserved = 0;
-                progressed = 1;
+                record_request_end_tombstone(channel_id, msg->message_id, msg->epoch);
+                msg->end_pending = 0;
+                msg->reuse_ready = 1;
+                break;
             }
-            if (all_end_seen(end_seen) && !progressed) {
-                uint64_t now_done = now_us();
-                if (last_end_seen_at != 0 &&
-                    now_done - done_since >= (2 * RTO_US) &&
-                    now_done - last_end_seen_at >= (3 * RTO_US) &&
-                    msg->end_ack_sent) {
-                    state->request_end_tombstone_seq[msg->message_id] = msg->epoch;
-                    state->request_end_tombstone_valid[msg->message_id] = 1;
-                    msg->end_pending = 0;
-                    msg->reuse_ready = 1;
-                    break;
-                }
-            }
-        } else {
-            done_since = 0;
         }
 
         if (fatal_register_failure || fatal_protocol_violation) {

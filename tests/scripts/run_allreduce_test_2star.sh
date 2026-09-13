@@ -37,11 +37,6 @@ bash "$ROOT/topology/star/setup.sh" setup
 for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do
   docker exec "$c" mkdir -p /app/build /app/tests/out /app/tests/data/current
   docker exec "$c" rm -f /app/tests/out/output-*.data /app/tests/out/*.log
-  docker cp "$BIN" "$c:/app/build/inc"
-done
-for r in 0 1 2 3; do
-  h=${HOSTS[$r]}
-  docker cp "$DATA_DIR/input-$r.data" "$h:/app/tests/data/current/input-$r.data"
 done
 for rt in "${ROUTERS[@]}"; do
   docker exec -d "$rt" bash -lc "cd /app && ./build/inc $rt $CFG_PATH allreduce > tests/out/$rt.log 2>&1"
@@ -73,16 +68,10 @@ fi
 missing=0
 for r in 0 1 2 3; do
   h=${HOSTS[$r]}
-  if docker cp "$h:/app/tests/out/output-$r.data" "$OUT_DIR/output-$r.data"; then
-    :
-  else
+  if [ ! -f "$OUT_DIR/output-$r.data" ]; then
     echo "missing output-$r.data from $h" >&2
     missing=1
   fi
-  docker cp "$h:/app/tests/out/$h.log" "$OUT_DIR/$h.log" 2>/dev/null || true
-done
-for rt in "${ROUTERS[@]}"; do
-  docker cp "$rt:/app/tests/out/$rt.log" "$OUT_DIR/$rt.log" 2>/dev/null || true
 done
 if [ $finished -ne 1 ] || [ $missing -ne 0 ]; then
   echo 'test artifacts were collected under tests/out' >&2

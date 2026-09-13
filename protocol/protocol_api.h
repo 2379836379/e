@@ -5,6 +5,7 @@
 
 void init_host(config_entry_t *cfgs, int n, const char *host_name);
 void start_host_rx(void);
+void host_wait_for_end_quiet(void);
 int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip);
 int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op);
 int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op);

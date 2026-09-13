@@ -10,6 +10,7 @@ ROUTERS=(router1)
 CFG=topology/star1/ranks.cfg
 N=4
 NINTS=4096
+LOSS_RATE="10%"
 
 cleanup() {
   set +e
@@ -53,18 +54,14 @@ for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do
     case "$dev" in
       eth0|lo) continue ;;
     esac
-    docker exec "$c" tc qdisc replace dev "$dev" root netem loss 10%
+    docker exec "$c" tc qdisc replace dev "$dev" root netem loss "$LOSS_RATE"
   done
 done
-echo "configured 10% packet loss on topology interfaces"
+echo "configured ${LOSS_RATE} packet loss on topology interfaces"
 
 for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do
   docker exec "$c" mkdir -p /app/build /app/tests/out /app/tests/data/current
-  docker cp "$BIN" "$c:/app/build/inc_1star"
-done
-for r in 0 1 2 3; do
-  docker cp "$DATA/input-$r.data" \
-    "host$((r + 1)):/app/tests/data/current/input-$r.data"
+  docker exec "$c" rm -f /app/tests/out/output-*.data /app/tests/out/*.log
 done
 
 docker exec -d router1 bash -lc \
@@ -76,7 +73,8 @@ for r in 0 1 2 3; do
     "cd /app && ./build/inc_1star $h $CFG allreduce > tests/out/$h.log 2>&1"
 done
 
-while :; do
+finished=0
+for _ in $(seq 1 600); do
   ready=1
   for r in 0 1 2 3; do
     if ! docker exec "${HOSTS[$r]}" test -f "/app/tests/out/output-$r.data"; then
@@ -84,14 +82,36 @@ while :; do
       break
     fi
   done
-  [ "$ready" -eq 1 ] && break
+  if [ "$ready" -eq 1 ]; then finished=1; break; fi
   sleep 1
 done
+if [ "$finished" -ne 1 ]; then
+  echo 'allreduce loss 1star test timed out waiting for output files' >&2
+  exit 1
+fi
 
+end_closed=1
 for r in 0 1 2 3; do
   h=${HOSTS[$r]}
-  docker cp "$h:/app/tests/out/output-$r.data" "$OUT/output-$r.data"
-  docker cp "$h:/app/tests/out/$h.log" "$OUT/$h.log"
+  if ! grep -q "\[host\] rank${r} allreduce done" "$OUT/$h.log"; then
+    echo "workers did not finish on $h" >&2
+    end_closed=0
+  fi
+  summary=$(awk -v channel="ch=$r" 'index($0,"[responder-summary]") && index($0,channel) { found=1; for (i=1;i<=NF;i++) { if ($i ~ /^request_commit=/) { split($i,a,"="); req+=a[2] } if ($i ~ /^repair_commit=/) { split($i,a,"="); rep+=a[2] } } } END { if (found) print req+rep; else print "NA" }' "$OUT/$h.log")
+  if [ "$summary" = "NA" ]; then
+    echo "responder ch=$r produced no summary (likely timeout or crash)" >&2
+    end_closed=0
+  elif [ "$summary" -ne 4 ]; then
+    echo "responder ch=$r committed ${summary}/4 credits" >&2
+    end_closed=0
+  fi
+  if [ ! -f "$OUT/output-$r.data" ]; then
+    echo "missing output-$r.data from $h" >&2
+    end_closed=0
+  fi
 done
-docker cp router1:/app/tests/out/router1.log "$OUT/router1.log"
+if [ "$end_closed" -ne 1 ]; then
+  echo 'allreduce loss 1star protocol did not close cleanly; artifacts were collected under tests/out' >&2
+  exit 1
+fi
 bash tests/scripts/helper.sh check allreduce "$N"

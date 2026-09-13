@@ -1,9 +1,7 @@
 # Base images 基础镜像
 FROM ubuntu:22.04
 
-# RUN timedatectl set-timezone Asia/Shanghai'
-COPY sources.list /etc/apt/sources.list
-COPY 99clab-noverify /etc/apt/apt.conf.d/99clab-noverify
+# Use the base image's configured Ubuntu package sources.
 RUN apt update 
 
 RUN echo -e "6\n70\n" | apt install tzdata 
@@ -15,5 +13,4 @@ RUN apt-get install bridge-utils -y
 
 
 CMD ["tail", "-f", "/dev/null"]
-
 

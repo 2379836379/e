@@ -4,6 +4,7 @@
 #include "runtime/runtime_common.h"
 
 #define MAX_ACTIVE_MESSAGES 256
+#define PENDING_RESPONSE_QUEUE_SIZE (MAX_ACTIVE_MESSAGES * AGTR_ARRAY_SIZE)
 
 typedef struct {
     uint32_t credit_offset;
@@ -89,8 +90,8 @@ typedef struct {
     uint64_t response_next_channel_credit_at;
     double response_repair_tokens;
     uint64_t response_repair_refill_at;
-    uint32_t pending_response_offsets[256];
-    uint8_t pending_response_message_ids[256];
+    uint32_t pending_response_offsets[PENDING_RESPONSE_QUEUE_SIZE];
+    uint8_t pending_response_message_ids[PENDING_RESPONSE_QUEUE_SIZE];
     uint32_t pending_response_head;
     uint32_t pending_response_tail;
     uint32_t request_end_tombstone_seq[MAX_ACTIVE_MESSAGES];
@@ -117,6 +118,10 @@ void host_inject_on_subchannel(uint32_t subchannel_id, uint8_t *frame, int len);
 int conn_pop(conn_t *cn, rx_msg_t *out);
 void register_request_result(uint32_t channel_id, void *buf, uint32_t size);
 void clear_request_result(uint32_t channel_id);
+void record_request_end_tombstone(uint32_t channel_id, uint8_t message_id, uint32_t epoch);
+int host_ack_tombstoned_end(uint32_t channel_id, uint32_t subchannel_id,
+                            uint8_t message_id, uint32_t epoch, uint32_t source_ip);
+void host_wait_for_end_quiet(void);
 protocol_message_t *request_message_by_id(uint32_t channel_id, uint8_t message_id);
 protocol_message_t *response_message_by_id(uint32_t channel_id, uint8_t message_id);
 protocol_message_t *find_request_message_for_sequence(uint32_t channel_id, uint32_t packet_sequence,

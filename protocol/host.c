@@ -50,6 +50,7 @@ pcap_t *g_host_handles[SUBCHANNEL_COUNT] = {0};
 pcap_t *g_host_tx_handles[SUBCHANNEL_COUNT] = {0};
 pthread_mutex_t g_tx_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_host_iface_macs[SUBCHANNEL_COUNT][6] = {{0}};
+static pthread_mutex_t g_end_tombstone_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void load_iface_mac(const char *iface, uint8_t mac[6]) {
     int fd;
@@ -140,6 +141,60 @@ void clear_request_result(uint32_t channel_id) {
     if (!state) return;
     state->request_result_buf = NULL;
     state->request_result_npkts = 0;
+}
+
+void record_request_end_tombstone(uint32_t channel_id, uint8_t message_id, uint32_t epoch) {
+    host_channel_state_t *state = find_channel_state(channel_id);
+    if (!state) return;
+    pthread_mutex_lock(&g_end_tombstone_lock);
+    state->request_end_tombstone_seq[message_id] = epoch;
+    state->request_end_tombstone_valid[message_id] = 1;
+    pthread_mutex_unlock(&g_end_tombstone_lock);
+}
+
+int host_ack_tombstoned_end(uint32_t channel_id, uint32_t subchannel_id,
+                            uint8_t message_id, uint32_t epoch, uint32_t source_ip) {
+    host_channel_state_t *state = find_channel_state(channel_id);
+    channel_ctx_t *ctx;
+    uint8_t frame[HDR_LEN];
+    static const uint32_t zero_stack[ARBOR_MAX_STACK_DEPTH] = {0};
+    static const uint8_t zero_fanin[ARBOR_MAX_STACK_DEPTH] = {0};
+    int len;
+    int matched;
+
+    if (!state || subchannel_id >= SUBCHANNEL_COUNT) return 0;
+    ctx = &state->channel;
+    if (!ctx->active || source_ip != ctx->responder_ip) return 0;
+
+    pthread_mutex_lock(&g_end_tombstone_lock);
+    matched = state->request_end_tombstone_valid[message_id] &&
+              state->request_end_tombstone_seq[message_id] == epoch;
+    pthread_mutex_unlock(&g_end_tombstone_lock);
+    if (!matched) return 0;
+
+    len = build_frame_ex(frame, ctx->local_ip, ctx->responder_ip,
+                         ARBOR_MSG_END_ACK, ARBOR_FLAG_VALID,
+                         channel_id, subchannel_id,
+                         0, epoch, 0, zero_stack, zero_fanin,
+                         ARBOR_REQ_NONE, NULL, 0);
+    arbor_store_message_id(frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t),
+                           message_id);
+    fprintf(stderr, "[end-ack-tombstone-tx] ch=%u sub=%u msg=%u epoch=%u dst_rank=%d\n",
+            channel_id, subchannel_id, (unsigned)message_id, epoch,
+            rank_of_ip(ctx->responder_ip));
+    host_inject_on_subchannel(subchannel_id, frame, len);
+    return 1;
+}
+
+void host_wait_for_end_quiet(void) {
+    const uint64_t deadline = now_us() + ((uint64_t)END_MAX_RETRIES + 3ULL) * RTO_US;
+
+    /* The reference host stays live while its responder END timer can retry.
+     * The CLI test process has no final ACK-of-ACK, so keep its control plane
+     * up for that same bounded retry horizon after application workers exit. */
+    while (now_us() < deadline) {
+        usleep(1000);
+    }
 }
 
 static protocol_message_t *message_by_id(protocol_message_t queue[MAX_ACTIVE_MESSAGES], uint8_t message_id) {
@@ -381,6 +436,11 @@ static void *host_rx_thread(void *arg) {
         if (channel_id >= MAX_CHANNELS) continue;
         ctx = find_channel(channel_id);
         if (!ctx) continue;
+        if (legacy_msg_type == ARBOR_MSG_END &&
+            host_ack_tombstoned_end(channel_id, subchannel_id, hdrv.message_id,
+                                    hdrv.offset_a, ip->src_ip)) {
+            continue;
+        }
         switch (legacy_msg_type) {
             case ARBOR_MSG_REGISTER:
             case ARBOR_MSG_REQUEST:
