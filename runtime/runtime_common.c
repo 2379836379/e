@@ -1,6 +1,7 @@
 #include "runtime/runtime_common.h"
 
 #include <stdio.h>
+#include <arpa/inet.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -8,6 +9,13 @@
 static int g_n = 0;
 static config_entry_t g_cfg[MAX_GROUP_SIZE];
 static uint32_t g_neighbor_masks[MAX_GROUP_SIZE];
+
+uint32_t arbor_multicast_ip(uint32_t channel_id, uint32_t subchannel_id) {
+    /* 239.192.0.0/14, with 12 bits for channel and 4 bits for subchannel. */
+    const uint32_t group = ((channel_id & 0x0fffu) << 4) |
+                           (subchannel_id & 0x0fu);
+    return htonl(0xefc00000u | group);
+}
 
 uint64_t now_us(void) {
     struct timeval tv;

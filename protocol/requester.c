@@ -255,7 +255,8 @@ static void store_response_payload(uint32_t channel_id, uint32_t local_offset,
            payload, payload_len > PAYLOAD_LEN ? PAYLOAD_LEN : payload_len);
 }
 
-int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
+static int request_mode(uint32_t channel_id, const void *buf, uint32_t size,
+                        uint8_t op, int pull) {
     pthread_once(&g_register_schedule_once, init_register_schedule_state);
     channel_ctx_t *ctx = find_channel(channel_id);
     host_channel_state_t *state = find_channel_state(channel_id);
@@ -469,8 +470,8 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                         c.agg_depth);
                 send_request_frame(sc, ctx->local_ip, ctx->responder_ip, msg->message_id,
                                    msg->start_sequence, &c,
-                                   src + c.credit_offset * PAYLOAD_LEN,
-                                   PAYLOAD_LEN, stats);
+                                   pull ? src + c.credit_offset * PAYLOAD_LEN : NULL,
+                                   pull ? PAYLOAD_LEN : 0, stats);
                 if (st && st->occupied && st->offset == c.credit_offset && !c.repair) {
                     st->request_sent = 1;
                     st->normal_credit_pending = 0;
@@ -514,4 +515,12 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
     free(register_acked);
     free(completed);
     return (fatal_register_failure || fatal_protocol_violation) ? -1 : (int)size;
+}
+
+int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
+    return request_mode(channel_id, buf, size, op, 1);
+}
+
+int request_push(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
+    return request_mode(channel_id, buf, size, op, 0);
 }

@@ -9,6 +9,8 @@ void host_wait_for_end_quiet(void);
 int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip);
 int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op);
 int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op);
+int request_push(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op);
+int respond_push(uint32_t channel_id, void *buf, uint32_t size, uint8_t op);
 void register_local_source(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op);
 void clear_local_source(uint32_t channel_id);
 void register_request_result(uint32_t channel_id, void *buf, uint32_t size);

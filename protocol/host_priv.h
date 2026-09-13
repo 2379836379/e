@@ -90,6 +90,9 @@ typedef struct {
     uint64_t response_next_channel_credit_at;
     double response_repair_tokens;
     uint64_t response_repair_refill_at;
+    uint8_t response_pull;
+    uint8_t response_payload;
+    uint8_t *response_buf;
     uint32_t pending_response_offsets[PENDING_RESPONSE_QUEUE_SIZE];
     uint8_t pending_response_message_ids[PENDING_RESPONSE_QUEUE_SIZE];
     uint32_t pending_response_head;

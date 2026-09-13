@@ -67,7 +67,18 @@ int build_frame_ex(uint8_t *buf,
                    const void *payload, uint16_t plen) {
     eth_header_t *eth = (eth_header_t *)buf;
     (void)request_kind;
-    memset(eth->dst_mac, 0xff, 6);
+    if ((ntohl(dst_ip) & 0xf0000000u) == 0xe0000000u) {
+        /* IPv4 multicast maps to 01:00:5e:xx:xx:xx. */
+        const uint32_t host_ip = ntohl(dst_ip);
+        eth->dst_mac[0] = 0x01;
+        eth->dst_mac[1] = 0x00;
+        eth->dst_mac[2] = 0x5e;
+        eth->dst_mac[3] = (uint8_t)((host_ip >> 16) & 0x7f);
+        eth->dst_mac[4] = (uint8_t)((host_ip >> 8) & 0xff);
+        eth->dst_mac[5] = (uint8_t)(host_ip & 0xff);
+    } else {
+        memset(eth->dst_mac, 0xff, 6);
+    }
     memset(eth->src_mac, 0x00, 6);
     eth->ether_type = htons(ETH_TYPE_IP);
 

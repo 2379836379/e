@@ -403,7 +403,6 @@ static void *host_rx_thread(void *arg) {
                     (unsigned)hdr->caplen);
         }
         if (ip->src_ip == g_my_ip) continue;
-        if (ip->dst_ip != g_my_ip) continue;
 
         int ip_ihl = (ip->version_ihl & 0x0f) * 4;
         const udp_header_t *udp = (const udp_header_t *)(pkt + sizeof(eth_header_t) + ip_ihl);
@@ -424,6 +423,8 @@ static void *host_rx_thread(void *arg) {
         channel_id = mtp_port_to_channel(udp_port);
         subchannel_id = mtp_port_to_subchannel(udp_port);
         if (subchannel_id >= SUBCHANNEL_COUNT) continue;
+        if (ip->dst_ip != g_my_ip &&
+            ip->dst_ip != arbor_multicast_ip(channel_id, subchannel_id)) continue;
         legacy_msg_type = arbor_legacy_msg_from_wire(&hdrv);
         if ((legacy_msg_type == ARBOR_MSG_REGISTER || legacy_msg_type == ARBOR_MSG_REGISTER_ACK) &&
             g_rank >= 4) {

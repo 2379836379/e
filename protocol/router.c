@@ -277,6 +277,34 @@ static void router_forward_bypass_tree(const uint8_t *frame, int len,
     inject_on_port(out_port, frame, len, responder_rank, subchannel_id);
 }
 
+/* Down-tree fanout for responder-originated control packets. */
+static void router_multicast_control(const uint8_t *frame, int len,
+                                     const char *ingress_port,
+                                     uint32_t subchannel_id,
+                                     uint32_t responder_ip) {
+    const int responder_rank = rank_of_ip(responder_ip);
+    const char *parent_up_port;
+    if (!g_router_topology || responder_rank < 0) return;
+    if (subchannel_id >= SUBCHANNEL_COUNT) subchannel_id = 0;
+    parent_up_port = router_tree_parent_up_port(g_router_topology, responder_rank,
+                                                subchannel_id);
+    if (!parent_up_port) return;
+    if (!router_ingress_from_parent(g_router_topology, responder_rank,
+                                    subchannel_id, ingress_port)) {
+        inject_on_port(parent_up_port, frame, len, responder_rank, subchannel_id);
+        return;
+    }
+    for (uint8_t i = 0; i < ArborRouterNodeMcastCount(g_router_topology,
+                                                       responder_rank,
+                                                       subchannel_id); ++i) {
+        const char *out_port = ArborRouterNodeMcastPort(g_router_topology,
+                                                        responder_rank,
+                                                        subchannel_id, i);
+        if (out_port && (!ingress_port || strcmp(out_port, ingress_port) != 0))
+            inject_on_port(out_port, frame, len, -1, subchannel_id);
+    }
+}
+
 static void router_multicast_response(const uint8_t *frame, int len, const char *ingress_port,
                                       uint32_t subchannel_id, uint32_t responder_ip, int credit_valid) {
     int responder_rank = rank_of_ip(responder_ip);
@@ -699,6 +727,14 @@ void INC(void) {
             hdr.packet_type == ARBOR_PKT_END || hdr.packet_type == ARBOR_PKT_END_ACK ||
             hdr.packet_type == ARBOR_PKT_AGG_MISS) {
             g_router_register_bypass++;
+            /* Responder-originated REGISTER_ACK/END are tree multicast;
+             * requester-originated REGISTER/END_ACK remain unicast. */
+            if ((hdr.packet_type == ARBOR_PKT_REGISTER_ACK ||
+                 hdr.packet_type == ARBOR_PKT_END) && rank_of_ip(ip->src_ip) >= 0) {
+                router_multicast_control(pk.data, pk.len, pk.device ? pk.device->name : NULL,
+                                         subchannel_id, ip->src_ip);
+                continue;
+            }
             if ((hdr.packet_type == ARBOR_PKT_REGISTER || hdr.packet_type == ARBOR_PKT_REGISTER_ACK) &&
                 g_router_topology && pk.device) {
                 int dst_rank = rank_of_ip(ip->dst_ip);

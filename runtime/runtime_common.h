@@ -90,5 +90,9 @@ uint8_t arbor_plan_request_fanin_stack(uint32_t requester_rank,
                                        uint8_t *fanin_vec_out,
                                        uint8_t max_depth);
 uint64_t now_us(void);
+/* Stable per-channel/subchannel IPv4 multicast destination used by the
+ * emulated Arbor tree.  The address is derived, so existing topology files
+ * remain valid without an additional address section. */
+uint32_t arbor_multicast_ip(uint32_t channel_id, uint32_t subchannel_id);
 
 #endif

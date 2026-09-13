@@ -5,8 +5,8 @@ build
 
 # *.data
 *.log
-# paper
-
+paper
+reference
 AGENT.MD
 
 

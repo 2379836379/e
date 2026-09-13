@@ -313,14 +313,10 @@ static void broadcast_response(uint8_t message_id, uint32_t channel_id, uint32_t
                                uint32_t agg_loc, uint16_t agg_level, uint8_t agg_valid,
                                uint16_t fanin, const void *payload, uint16_t plen, uint64_t due_at,
                                arbor_payload_kind_t payload_kind, uint8_t repair) {
-    for (int i = 0; i < g_n; i++) {
-        uint32_t dst_ip = g_cfg[i].host_ip;
-        if (dst_ip == g_my_ip) continue;
-        send_response_frame(dst_ip, message_id, channel_id, subchannel_id,
-                            credit_offset, payload_offset, agg_loc,
-                            agg_level, agg_valid, fanin, payload, plen, due_at,
-                            payload_kind, repair);
-    }
+    send_response_frame(arbor_multicast_ip(channel_id, subchannel_id), message_id,
+                        channel_id, subchannel_id, credit_offset, payload_offset,
+                        agg_loc, agg_level, agg_valid, fanin, payload, plen, due_at,
+                        payload_kind, repair);
 }
 
 static void cache_primary_response(credit_entry_t *e, uint8_t message_id, uint32_t channel_id,
@@ -391,20 +387,17 @@ static credit_entry_t *find_replay_predecessor(credit_entry_t *entries,
 static void send_repair_trigger(uint32_t channel_id, uint32_t subchannel_id,
                                 uint8_t message_id, uint32_t credit_offset, uint32_t agg_loc,
                                 uint32_t replay_payload_offset, const uint8_t *replay_payload, uint16_t replay_len) {
-    for (int i = 0; i < g_n; i++) {
-        uint32_t dst_ip = g_cfg[i].host_ip;
-        (void)agg_loc;
-        send_response_frame(dst_ip, message_id, channel_id, subchannel_id,
-                            credit_offset, replay_payload_offset, agg_loc,
-                            0, 0, 0, replay_payload, replay_len, 0,
-                            ARBOR_PAYLOAD_REPLAY, 1);
-    }
+    (void)agg_loc;
+    send_response_frame(arbor_multicast_ip(channel_id, subchannel_id), message_id,
+                        channel_id, subchannel_id, credit_offset,
+                        replay_payload_offset, agg_loc, 0, 0, 0,
+                        replay_payload, replay_len, 0, ARBOR_PAYLOAD_REPLAY, 1);
 }
 
 static void send_register_ack_all(uint32_t channel_id, uint32_t subchannel_id, uint8_t message_id, uint32_t epoch) {
-    for (int i = 0; i < g_n; i++) {
-        uint32_t dst_ip = g_cfg[i].host_ip;
-        if (dst_ip == g_my_ip) continue;
+    {
+        uint32_t dst_ip = arbor_multicast_ip(channel_id, subchannel_id);
+        {
         uint8_t frame[HDR_LEN];
         static const uint32_t zero_stack[ARBOR_MAX_STACK_DEPTH] = {0};
         static const uint8_t zero_fanin[ARBOR_MAX_STACK_DEPTH] = {0};
@@ -418,6 +411,7 @@ static void send_register_ack_all(uint32_t channel_id, uint32_t subchannel_id, u
                 "[register-ack-tx] ch=%u sub=%u dst_rank=%d msg=%u epoch=%u\n",
                 channel_id, subchannel_id, rank_of_ip(dst_ip), message_id, epoch);
         (void)enqueue_send_frame(subchannel_id, frame, (uint32_t)len, 0);
+        }
     }
     if (subchannel_id < SUBCHANNEL_COUNT) {
         g_responder_stats[subchannel_id].register_ack_sent++;
@@ -460,9 +454,8 @@ static void flush_register_acks(uint32_t channel_id,
 static void send_end_all(uint32_t channel_id, const uint8_t *register_message_id, const uint8_t *register_message_id_valid, const uint32_t *register_epoch, const uint8_t *register_epoch_valid) {
     for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
         if (register_message_id_valid && !register_message_id_valid[s]) continue;
-        for (int i = 0; i < g_n; i++) {
-            uint32_t dst_ip = g_cfg[i].host_ip;
-            if (dst_ip == g_my_ip) continue;
+        {
+            uint32_t dst_ip = arbor_multicast_ip(channel_id, s);
             uint8_t frame[HDR_LEN];
             static const uint32_t zero_stack[ARBOR_MAX_STACK_DEPTH] = {0};
             static const uint8_t zero_fanin[ARBOR_MAX_STACK_DEPTH] = {0};
@@ -881,6 +874,37 @@ static int maybe_issue_credits(uint32_t channel_id, protocol_message_t *meta,
                         credit_gap_us, credit_window,
                         &reserved, &credit_offset, &agg_loc, &agg_level, &agg_valid)) return 0;
 
+    /* Push messages self-commit at credit issue time.  Requesters later send
+     * header-only aggregated ACKs; those ACKs only complete the consumer
+     * bitmap and never trigger a second payload response. */
+    if (state && !state->response_pull && reserved) {
+        uint8_t result[PAYLOAD_LEN];
+        const uint16_t plen = state->response_payload ? PAYLOAD_LEN : 0;
+        const uint32_t local_offset = reserved->local_credit_offset;
+        build_result_payload(channel_id, result, local_offset, NULL, 0);
+        if (state->response_buf)
+            memcpy(state->response_buf + local_offset * PAYLOAD_LEN, result, PAYLOAD_LEN);
+        memcpy(reserved->result, result, PAYLOAD_LEN);
+        cache_primary_response(reserved, meta->message_id, channel_id, subchannel_id,
+                               credit_offset, credit_offset, 0, 0, 0, fanin,
+                               result, plen);
+        reserved->committed = 1;
+        reserved->tail_response_valid = 1;
+        reserved->bound_payload_valid = 1;
+        reserved->bound_payload_offset = credit_offset;
+        reserved->bound_by_credit_offset = credit_offset;
+        reserved->tail_successor_credit_offset = credit_offset;
+        memcpy(reserved->bound_payload, result, PAYLOAD_LEN);
+        note_non_sample_completion(reserved, COMPLETION_KIND_DIRECT);
+        broadcast_response(meta->message_id, channel_id, subchannel_id,
+                           credit_offset, credit_offset, 0, 0, 0, fanin,
+                           plen ? result : NULL, plen, now_us(),
+                           plen ? ARBOR_PAYLOAD_DATA : ARBOR_PAYLOAD_COMPLETION, 0);
+        reserved->completion_sent = 1;
+        note_registration_credit_sent(meta, subchannel_id);
+        return 1;
+    }
+
     uint8_t pending_mid;
     uint32_t pending_off;
     int bound = 0;
@@ -1029,7 +1053,8 @@ static void issue_ready_credits_round(uint32_t channel_id,
 }
 
 
-int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
+static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
+                        uint8_t op, int pull, int response_payload) {
     (void)op;
 
     channel_ctx_t *ctx = find_channel(channel_id);
@@ -1065,6 +1090,9 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
     uint8_t register_epoch_valid[SUBCHANNEL_COUNT] = {0};
     uint64_t next_credit_at[SUBCHANNEL_COUNT] = {0};
     state->response_credits_outstanding = 0;
+    state->response_pull = pull ? 1u : 0u;
+    state->response_payload = response_payload ? 1u : 0u;
+    state->response_buf = (uint8_t *)buf;
     state->response_sub_rr = 0;
     state->response_next_channel_credit_at = 0;
     state->response_repair_tokens = REPAIR_BURST_BYTES;
@@ -1389,7 +1417,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                 continue;
             }
 
-            if (e->committed) {
+            if (e->committed && !from_repair) {
                 replay_completion_response(e, channel_id, m.subchannel_id, fanin);
                 continue;
             }
@@ -1397,6 +1425,17 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                 g_responder_stats[m.subchannel_id].repair_request_recv++;
                 accumulate_requester_input(e, req_mask, m.payload, m.payload_len, 1, 1);
                 fprintf(stderr, "[repair-request-rx] ch=%u sub=%u offset=%u src_rank=%d bitmap=0x%x expected=0x%x\n", channel_id, m.subchannel_id, local_credit_offset, rank_of_ip(m.src_ip), e->repair_bitmap, expected_requesters);
+                if (e->committed) {
+                    /* Push entries self-commit at credit issue.  Repair
+                     * requests therefore only provide the consumer ACK
+                     * bitmap; do not emit a second response. */
+                    if ((e->repair_bitmap & expected_requesters) == expected_requesters) {
+                        e->requester_bitmap = expected_requesters;
+                        (void)mark_entry_done(channel_id, e, expected_requesters,
+                                              &done_count);
+                    }
+                    continue;
+                }
                 ready_bitmap = e->repair_bitmap;
                 accum_payload = (const uint8_t *)e->repair_accum;
                 completion_kind = COMPLETION_KIND_REPAIR;
@@ -1462,4 +1501,12 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
     free(entries);
     pthread_mutex_unlock(&state->responder_lock);
     return (int)size;
+}
+
+int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
+    return respond_mode(channel_id, buf, size, op, 1, 1);
+}
+
+int respond_push(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
+    return respond_mode(channel_id, buf, size, op, 0, 1);
 }
