@@ -10,7 +10,7 @@ ROUTERS=(router1)
 CFG=topology/star1/ranks.cfg
 N=4
 NINTS=4096
-LOSS_RATE="10%"
+LOSS_RATE="20%"
 
 cleanup() {
   set +e

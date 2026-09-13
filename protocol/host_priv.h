@@ -87,6 +87,8 @@ typedef struct {
     uint8_t response_message_cursor;
     uint32_t response_credits_outstanding;
     uint8_t response_sub_rr;
+    uint8_t response_next_message_id;
+    uint32_t response_next_sequence;
     uint64_t response_next_channel_credit_at;
     double response_repair_tokens;
     uint64_t response_repair_refill_at;
@@ -123,6 +125,7 @@ subchannel_ctx_t *find_subchannel_by_port(uint16_t udp_port);
 void host_inject(uint8_t *frame, int len);
 void host_inject_on_subchannel(uint32_t subchannel_id, uint8_t *frame, int len);
 int conn_pop(conn_t *cn, rx_msg_t *out);
+int conn_pop_matching(conn_t *cn, uint32_t channel_id, uint8_t message_id, rx_msg_t *out);
 void register_request_result(uint32_t channel_id, void *buf, uint32_t size);
 void clear_request_result(uint32_t channel_id);
 void record_request_end_tombstone(uint32_t channel_id, uint8_t message_id, uint32_t epoch);

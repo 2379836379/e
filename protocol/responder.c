@@ -13,6 +13,24 @@
 #define REPAIR_BUDGET_BPS 5000000000ULL
 #define REPAIR_BURST_BYTES (1024.0 * 1024.0)
 
+typedef struct responder_call_ctx {
+    uint8_t message_id;
+    uint8_t response_pull;
+    uint8_t response_payload;
+    uint8_t response_sub_rr;
+    uint8_t *response_buf;
+    uint32_t response_credits_outstanding;
+    uint64_t response_next_channel_credit_at;
+    double response_repair_tokens;
+    uint64_t response_repair_refill_at;
+    uint32_t pending_response_offsets[PENDING_RESPONSE_QUEUE_SIZE];
+    uint8_t pending_response_message_ids[PENDING_RESPONSE_QUEUE_SIZE];
+    uint32_t pending_response_head;
+    uint32_t pending_response_tail;
+} responder_call_ctx_t;
+
+static __thread responder_call_ctx_t *g_call_ctx;
+
 static uint64_t fixed_credit_gap_us(void) {
     return FIXED_RS_CREDITS_PER_SEC > 0 ? (1000000ULL / FIXED_RS_CREDITS_PER_SEC) : 0;
 }
@@ -23,12 +41,20 @@ static uint64_t channel_credit_gap_us(void) {
 
 static double refill_repair_tokens(host_channel_state_t *state, uint64_t now_us) {
     double burst = REPAIR_BURST_BYTES;
-    if (!state) return 0.0;
-    if (state->response_repair_refill_at == 0) {
-        state->response_repair_refill_at = now_us;
-        if (state->response_repair_tokens < burst) state->response_repair_tokens = burst;
-        return state->response_repair_tokens;
+    if (g_call_ctx) {
+        if (g_call_ctx->response_repair_refill_at == 0) {
+            g_call_ctx->response_repair_refill_at = now_us;
+            if (g_call_ctx->response_repair_tokens < burst) g_call_ctx->response_repair_tokens = burst;
+            return g_call_ctx->response_repair_tokens;
+        }
+        if (now_us > g_call_ctx->response_repair_refill_at) {
+            g_call_ctx->response_repair_tokens += (double)(now_us - g_call_ctx->response_repair_refill_at) * (double)REPAIR_BUDGET_BPS / 8e6;
+            if (g_call_ctx->response_repair_tokens > burst) g_call_ctx->response_repair_tokens = burst;
+            g_call_ctx->response_repair_refill_at = now_us;
+        }
+        return g_call_ctx->response_repair_tokens;
     }
+    if (!state) return 0.0;
     if (now_us > state->response_repair_refill_at) {
         state->response_repair_tokens += (double)(now_us - state->response_repair_refill_at) * (double)REPAIR_BUDGET_BPS / 8e6;
         if (state->response_repair_tokens > burst) state->response_repair_tokens = burst;
@@ -38,6 +64,12 @@ static double refill_repair_tokens(host_channel_state_t *state, uint64_t now_us)
 }
 
 static int charge_repair_tokens(host_channel_state_t *state, uint64_t now_us, double bytes) {
+    if (g_call_ctx) {
+        refill_repair_tokens(state, now_us);
+        if (g_call_ctx->response_repair_tokens < bytes) return 0;
+        g_call_ctx->response_repair_tokens -= bytes;
+        return 1;
+    }
     if (!state) return 0;
     refill_repair_tokens(state, now_us);
     if (state->response_repair_tokens < bytes) return 0;
@@ -434,8 +466,9 @@ static void flush_register_acks(uint32_t channel_id,
                                 const uint32_t *register_epoch,
                                 const uint8_t *register_epoch_valid) {
     for (uint16_t msg_id = 0; msg_id < MAX_ACTIVE_MESSAGES; ++msg_id) {
-        protocol_message_t *meta = response_message_by_id(channel_id, (uint8_t)msg_id);
-        if (!meta || !meta->in_use || meta->register_ack_pending == 0) continue;
+            protocol_message_t *meta = response_message_by_id(channel_id, (uint8_t)msg_id);
+            if (!meta || !meta->in_use || meta->register_ack_pending == 0) continue;
+            if (g_call_ctx && meta->message_id != g_call_ctx->message_id) continue;
         for (uint32_t s = 0; s < SUBCHANNEL_COUNT; ++s) {
             const uint8_t sub_bit = (uint8_t)(1u << s);
             if ((meta->register_ack_pending & sub_bit) == 0) continue;
@@ -499,7 +532,8 @@ static void note_credit_sent(uint32_t channel_id, credit_entry_t *e, credit_entr
                              uint64_t credit_gap_us, uint32_t credit_window) {
     host_channel_state_t *state = find_channel_state(channel_id);
     e->sent_at = now_us();
-    e->ref_inflight = state ? state->response_credits_outstanding : inflight_credit_count_subchannel(entries, e->subchannel_id);
+    e->ref_inflight = g_call_ctx ? g_call_ctx->response_credits_outstanding :
+        (state ? state->response_credits_outstanding : inflight_credit_count_subchannel(entries, e->subchannel_id));
     e->ref_credit_gap_us = clamp_credit_gap_us(credit_gap_us);
     e->ref_window = clamp_credit_window(credit_window);
     e->ce_seen = 0;
@@ -509,7 +543,8 @@ static void note_credit_sent(uint32_t channel_id, credit_entry_t *e, credit_entr
     e->completion_kind = COMPLETION_KIND_NONE;
     {
         host_channel_state_t *state = find_channel_state(channel_id);
-        if (state) state->response_credits_outstanding++;
+        if (g_call_ctx) g_call_ctx->response_credits_outstanding++;
+        else if (state) state->response_credits_outstanding++;
     }
 }
 
@@ -586,7 +621,8 @@ static int mark_entry_done(uint32_t channel_id, credit_entry_t *e, uint32_t expe
     if (done_count) (*done_count)++;
     {
         host_channel_state_t *state = find_channel_state(channel_id);
-        if (state && state->response_credits_outstanding > 0) state->response_credits_outstanding--;
+        if (g_call_ctx && g_call_ctx->response_credits_outstanding > 0) g_call_ctx->response_credits_outstanding--;
+        else if (state && state->response_credits_outstanding > 0) state->response_credits_outstanding--;
     }
     return 1;
 }
@@ -821,22 +857,29 @@ static void replay_tail_responses(uint32_t channel_id, uint16_t fanin,
 }
 
 static void pending_response_push(host_channel_state_t *state, uint8_t message_id, uint32_t payload_offset) {
-    if (!state) return;
-    if (state->pending_response_tail - state->pending_response_head >= PENDING_RESPONSE_QUEUE_SIZE) {
+    uint32_t *head = g_call_ctx ? &g_call_ctx->pending_response_head : &state->pending_response_head;
+    uint32_t *tail = g_call_ctx ? &g_call_ctx->pending_response_tail : &state->pending_response_tail;
+    uint32_t *offsets = g_call_ctx ? g_call_ctx->pending_response_offsets : state->pending_response_offsets;
+    uint8_t *ids = g_call_ctx ? g_call_ctx->pending_response_message_ids : state->pending_response_message_ids;
+    if (!state && !g_call_ctx) return;
+    if (*tail - *head >= PENDING_RESPONSE_QUEUE_SIZE) {
         fprintf(stderr, "[responder-pending-response-full] payload offset=%u message=%u\n",
                 payload_offset, (unsigned)message_id);
         return;
     }
-    uint32_t pos = state->pending_response_tail++ % PENDING_RESPONSE_QUEUE_SIZE;
-    state->pending_response_offsets[pos] = payload_offset;
-    state->pending_response_message_ids[pos] = message_id;
+    uint32_t pos = (*tail)++ % PENDING_RESPONSE_QUEUE_SIZE;
+    offsets[pos] = payload_offset;
+    ids[pos] = message_id;
 }
 
 static int pending_response_pop(host_channel_state_t *state, uint8_t *message_id, uint32_t *payload_offset) {
-    if (!state || state->pending_response_head == state->pending_response_tail) return 0;
-    uint32_t pos = state->pending_response_head++ % PENDING_RESPONSE_QUEUE_SIZE;
-    if (message_id) *message_id = state->pending_response_message_ids[pos];
-    if (payload_offset) *payload_offset = state->pending_response_offsets[pos];
+    uint32_t *head = g_call_ctx ? &g_call_ctx->pending_response_head : (state ? &state->pending_response_head : NULL);
+    uint32_t tail = g_call_ctx ? g_call_ctx->pending_response_tail : (state ? state->pending_response_tail : 0);
+    uint32_t pos;
+    if (!head || *head == tail) return 0;
+    pos = (*head)++ % PENDING_RESPONSE_QUEUE_SIZE;
+    if (message_id) *message_id = g_call_ctx ? g_call_ctx->pending_response_message_ids[pos] : state->pending_response_message_ids[pos];
+    if (payload_offset) *payload_offset = g_call_ctx ? g_call_ctx->pending_response_offsets[pos] : state->pending_response_offsets[pos];
     return 1;
 }
 
@@ -877,13 +920,13 @@ static int maybe_issue_credits(uint32_t channel_id, protocol_message_t *meta,
     /* Push messages self-commit at credit issue time.  Requesters later send
      * header-only aggregated ACKs; those ACKs only complete the consumer
      * bitmap and never trigger a second payload response. */
-    if (state && !state->response_pull && reserved) {
+    if (g_call_ctx && !g_call_ctx->response_pull && reserved) {
         uint8_t result[PAYLOAD_LEN];
-        const uint16_t plen = state->response_payload ? PAYLOAD_LEN : 0;
+        const uint16_t plen = g_call_ctx->response_payload ? PAYLOAD_LEN : 0;
         const uint32_t local_offset = reserved->local_credit_offset;
         build_result_payload(channel_id, result, local_offset, NULL, 0);
-        if (state->response_buf)
-            memcpy(state->response_buf + local_offset * PAYLOAD_LEN, result, PAYLOAD_LEN);
+        if (g_call_ctx->response_buf)
+            memcpy(g_call_ctx->response_buf + local_offset * PAYLOAD_LEN, result, PAYLOAD_LEN);
         memcpy(reserved->result, result, PAYLOAD_LEN);
         cache_primary_response(reserved, meta->message_id, channel_id, subchannel_id,
                                credit_offset, credit_offset, 0, 0, 0, fanin,
@@ -1018,20 +1061,21 @@ static void issue_ready_credits_round(uint32_t channel_id,
                                       uint64_t *credit_gap_us,
                                       uint32_t *credit_window) {
     host_channel_state_t *state = find_channel_state(channel_id);
-    uint8_t start_msg = state ? state->response_message_cursor : 0;
+    uint8_t start_msg = g_call_ctx ? g_call_ctx->message_id : (state ? state->response_message_cursor : 0);
     uint64_t now = now_us();
     const uint64_t channel_gap = channel_credit_gap_us();
-    if (state && state->response_credits_outstanding >= (1u << 20)) return;
-    if (state && state->response_next_channel_credit_at != 0 && now < state->response_next_channel_credit_at) return;
+    if (g_call_ctx && g_call_ctx->response_credits_outstanding >= (1u << 20)) return;
+    if (g_call_ctx && g_call_ctx->response_next_channel_credit_at != 0 && now < g_call_ctx->response_next_channel_credit_at) return;
     int made_progress;
     do {
         made_progress = 0;
         for (uint16_t mi = 0; mi < MAX_ACTIVE_MESSAGES; ++mi) {
             uint8_t msg_id = (uint8_t)(start_msg + mi);
+            if (g_call_ctx && msg_id != g_call_ctx->message_id) continue;
             protocol_message_t *meta = response_message_by_id(channel_id, msg_id);
             if (!meta || response_message_done(meta) || meta->next_credit_offset >= meta->total_packets) continue;
             for (uint32_t i = 0; i < SUBCHANNEL_COUNT; i++) {
-                uint32_t s = state ? (uint32_t)((state->response_sub_rr + i) % SUBCHANNEL_COUNT)
+                uint32_t s = g_call_ctx ? (uint32_t)((g_call_ctx->response_sub_rr + i) % SUBCHANNEL_COUNT)
                                    : (meta->next_credit_subchannel + i) % SUBCHANNEL_COUNT;
                 if (!message_subchannel_ready(meta, s)) continue;
                 if (credit_window && inflight_credit_count_subchannel(entries, s) >= credit_window[s]) continue;
@@ -1040,7 +1084,10 @@ static void issue_ready_credits_round(uint32_t channel_id,
                                          credit_gap_us ? credit_gap_us[s] : fixed_credit_gap_us(),
                                          credit_window ? credit_window[s] : FIXED_STARTUP_WINDOW)) continue;
                 meta->next_credit_subchannel = (uint8_t)((s + 1) % SUBCHANNEL_COUNT);
-                if (state) {
+                if (g_call_ctx) {
+                    g_call_ctx->response_sub_rr = (uint8_t)((s + 1) % SUBCHANNEL_COUNT);
+                    g_call_ctx->response_next_channel_credit_at = now + channel_gap;
+                } else if (state) {
                     state->response_message_cursor = msg_id;
                     state->response_sub_rr = (uint8_t)((s + 1) % SUBCHANNEL_COUNT);
                     state->response_next_channel_credit_at = now + channel_gap;
@@ -1059,22 +1106,57 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
 
     channel_ctx_t *ctx = find_channel(channel_id);
     host_channel_state_t *state = find_channel_state(channel_id);
-    if (!ctx || !state) return -1;
-
-    /* A respond() call currently owns the channel-local credit and END
-     * bookkeeping below.  Do not let a second message reset that state while
-     * this one is still waiting for END_ACKs. */
-    pthread_mutex_lock(&state->responder_lock);
-
+    responder_call_ctx_t call_ctx;
+    uint8_t target_message_id;
+    int id_reserved = 0;
+    uint32_t expected_epoch;
     uint32_t total_npkts = size / PAYLOAD_LEN;
-    if (total_npkts == 0) {
-        pthread_mutex_unlock(&state->responder_lock);
-        return 0;
+    if (!ctx || !state) return -1;
+    if (total_npkts == 0) return 0;
+
+    memset(&call_ctx, 0, sizeof(call_ctx));
+    /* Message IDs are allocated in the same per-channel order as requester
+     * submissions.  Only this short allocation section is serialized; the
+     * message state machine itself runs concurrently. */
+    pthread_mutex_lock(&state->responder_lock);
+    for (uint16_t i = 0; i < MAX_ACTIVE_MESSAGES; ++i) {
+        uint8_t candidate = (uint8_t)(state->response_next_message_id + i);
+        protocol_message_t *slot = response_message_by_id(channel_id, candidate);
+        if (!slot || !slot->in_use || slot->reuse_ready) {
+            target_message_id = candidate;
+            state->response_next_message_id = (uint8_t)(candidate + 1u);
+            if (slot) {
+                memset(slot, 0, sizeof(*slot));
+                slot->in_use = 1;
+                slot->message_id = candidate;
+            }
+            id_reserved = 1;
+            break;
+        }
     }
+    pthread_mutex_unlock(&state->responder_lock);
+    if (!id_reserved) return -1;
+    call_ctx.message_id = target_message_id;
+    g_call_ctx = &call_ctx;
+
+    pthread_mutex_lock(&state->responder_lock);
+    expected_epoch = state->response_next_sequence & ARBOR_SEQUENCE_MASK;
+    state->response_next_sequence = arbor_protocol_sequence_add(expected_epoch, total_npkts);
+    pthread_mutex_unlock(&state->responder_lock);
 
     credit_entry_t *entries = calloc(AGTR_ARRAY_SIZE, sizeof(credit_entry_t));
     if (!entries) {
+        pthread_mutex_lock(&state->responder_lock);
+        {
+            protocol_message_t *slot = response_message_by_id(channel_id, target_message_id);
+            if (slot && slot->in_use && !slot->sequence_reserved) memset(slot, 0, sizeof(*slot));
+            if (state->response_next_sequence ==
+                arbor_protocol_sequence_add(expected_epoch, total_npkts)) {
+                state->response_next_sequence = expected_epoch;
+            }
+        }
         pthread_mutex_unlock(&state->responder_lock);
+        g_call_ctx = NULL;
         return -1;
     }
 
@@ -1089,14 +1171,11 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
     uint32_t register_epoch[SUBCHANNEL_COUNT] = {0};
     uint8_t register_epoch_valid[SUBCHANNEL_COUNT] = {0};
     uint64_t next_credit_at[SUBCHANNEL_COUNT] = {0};
-    state->response_credits_outstanding = 0;
-    state->response_pull = pull ? 1u : 0u;
-    state->response_payload = response_payload ? 1u : 0u;
-    state->response_buf = (uint8_t *)buf;
-    state->response_sub_rr = 0;
-    state->response_next_channel_credit_at = 0;
-    state->response_repair_tokens = REPAIR_BURST_BYTES;
-    state->response_repair_refill_at = now_us();
+    call_ctx.response_pull = pull ? 1u : 0u;
+    call_ctx.response_payload = response_payload ? 1u : 0u;
+    call_ctx.response_buf = (uint8_t *)buf;
+    call_ctx.response_repair_tokens = REPAIR_BURST_BYTES;
+    call_ctx.response_repair_refill_at = now_us();
     uint64_t credit_gap_us[SUBCHANNEL_COUNT];
     uint32_t credit_window[SUBCHANNEL_COUNT];
     for (uint32_t s = 0; s < SUBCHANNEL_COUNT; ++s) {
@@ -1133,7 +1212,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
             if (maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count) < 0) {
                 dump_responder_stats(channel_id);
                 free(entries);
-                pthread_mutex_unlock(&state->responder_lock);
+                g_call_ctx = NULL;
                 return -1;
             }
         }
@@ -1148,7 +1227,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                 fprintf(stderr, "[responder-end-timeout] ch=%u retries=%u end_ack=0x%x expected=0x%x\n",
                         channel_id, end_retries, end_ack_mask, expected_requesters);
                 free(entries);
-                pthread_mutex_unlock(&state->responder_lock);
+                g_call_ctx = NULL;
                 return -1;
             }
             replay_tail_responses(channel_id, fanin, entries);
@@ -1160,7 +1239,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                             register_epoch, register_epoch_valid);
         flush_send_queue();
 
-        while (conn_pop(cn, &m)) {
+        while (conn_pop_matching(cn, channel_id, target_message_id, &m)) {
             popped_any = 1;
             uint64_t now = now_us();
             if (now >= next_progress_log) {
@@ -1180,7 +1259,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                 if (maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count) < 0) {
                     dump_responder_stats(channel_id);
                     free(entries);
-                    pthread_mutex_unlock(&state->responder_lock);
+                    g_call_ctx = NULL;
                     return -1;
                 }
             }
@@ -1193,7 +1272,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                     fprintf(stderr, "[responder-end-timeout] ch=%u retries=%u end_ack=0x%x expected=0x%x\n",
                             channel_id, end_retries, end_ack_mask, expected_requesters);
                     free(entries);
-                    pthread_mutex_unlock(&state->responder_lock);
+                    g_call_ctx = NULL;
                     return -1;
                 }
                 replay_tail_responses(channel_id, fanin, entries);
@@ -1227,7 +1306,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                 if (try_enter_repair(channel_id, m.subchannel_id, expected_requester_count, entries, e) < 0) {
                     dump_responder_stats(channel_id);
                     free(entries);
-                    pthread_mutex_unlock(&state->responder_lock);
+                    g_call_ctx = NULL;
                     return -1;
                 }
                 continue;
@@ -1248,6 +1327,12 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
             }
 
             if (m.msg_type == ARBOR_MSG_REGISTER) {
+                if (m.payload_offset != expected_epoch) {
+                    fprintf(stderr,
+                            "[responder-register-drop] ch=%u msg=%u got_epoch=%u expected_epoch=%u\n",
+                            channel_id, (unsigned)m.message_id, m.payload_offset, expected_epoch);
+                    continue;
+                }
                 protocol_message_t *meta = upsert_response_message(channel_id, m.message_id,
                                                                   m.payload_offset, total_npkts);
                 uint32_t req_mask;
@@ -1499,7 +1584,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
     flush_send_queue();
     dump_responder_stats(channel_id);
     free(entries);
-    pthread_mutex_unlock(&state->responder_lock);
+    g_call_ctx = NULL;
     return (int)size;
 }
 

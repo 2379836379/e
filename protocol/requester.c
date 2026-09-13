@@ -296,7 +296,10 @@ static int request_mode(uint32_t channel_id, const void *buf, uint32_t size,
 
         conn_t *cn = &g_conns[ctx->uplink_conn];
         rx_msg_t m;
-        while (conn_pop(cn, &m)) {
+        /* Multiple messages on one channel share the same connection queue;
+         * consume only packets belonging to this message so concurrent
+         * request() calls cannot steal each other's responses. */
+        while (conn_pop_matching(cn, channel_id, msg->message_id, &m)) {
             if (m.channel_id != channel_id) continue;
 
             if (m.msg_type == ARBOR_MSG_REGISTER_ACK) {
@@ -366,7 +369,11 @@ static int request_mode(uint32_t channel_id, const void *buf, uint32_t size,
                     register_acked[m.subchannel_id] = 1;
                     msg->register_acked_mask |= (uint8_t)(1u << m.subchannel_id);
                     requester_offset_state_t *st = offset_state_for(offset_ring, local_credit_offset);
-                    if (completed[local_credit_offset]) {
+                    /* Pull payload completion implies the request was already
+                     * consumed.  Push uses the same offset for payload and
+                     * self-credit, but still needs a header-only consumption
+                     * ACK, so do not suppress it for pull=false. */
+                    if (completed[local_credit_offset] && pull) {
                         continue;
                     }
                     if (!repair_valid && st->occupied && st->offset == local_credit_offset &&

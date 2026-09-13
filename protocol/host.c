@@ -51,6 +51,8 @@ pcap_t *g_host_tx_handles[SUBCHANNEL_COUNT] = {0};
 pthread_mutex_t g_tx_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_host_iface_macs[SUBCHANNEL_COUNT][6] = {{0}};
 static pthread_mutex_t g_end_tombstone_lock = PTHREAD_MUTEX_INITIALIZER;
+static __thread uint8_t g_request_lookup_hint;
+static __thread uint8_t g_response_lookup_hint;
 
 static void load_iface_mac(const char *iface, uint8_t mac[6]) {
     int fd;
@@ -296,7 +298,7 @@ protocol_message_t *find_request_message_for_sequence(uint32_t channel_id, uint3
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state) return NULL;
     return find_message_for_sequence(state->request_messages,
-                                     &state->request_message_lookup_hint,
+                                     &g_request_lookup_hint,
                                      packet_sequence, local_offset_out);
 }
 
@@ -305,7 +307,7 @@ protocol_message_t *find_response_message_for_sequence(uint32_t channel_id, uint
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state) return NULL;
     return find_message_for_sequence(state->response_messages,
-                                     &state->response_message_lookup_hint,
+                                     &g_response_lookup_hint,
                                      packet_sequence, local_offset_out);
 }
 
@@ -535,6 +537,35 @@ int conn_pop(conn_t *cn, rx_msg_t *out) {
     }
     pthread_mutex_unlock(&cn->lock);
     return ok;
+}
+
+/* Remove one packet for a specific message without consuming packets owned by
+ * another concurrent protocol worker on the same channel. */
+int conn_pop_matching(conn_t *cn, uint32_t channel_id, uint8_t message_id, rx_msg_t *out) {
+    int idx;
+    int head;
+    if (!cn || !out) return 0;
+    pthread_mutex_lock(&cn->lock);
+    idx = cn->tail;
+    head = cn->head;
+    while (idx != head) {
+        rx_msg_t *candidate = &cn->queue[idx];
+        if (candidate->channel_id == channel_id && candidate->message_id == message_id) {
+            int next = (idx + 1) % RXQ_SIZE;
+            *out = *candidate;
+            while (next != head) {
+                int prev = (next + RXQ_SIZE - 1) % RXQ_SIZE;
+                cn->queue[prev] = cn->queue[next];
+                next = (next + 1) % RXQ_SIZE;
+            }
+            cn->head = (head + RXQ_SIZE - 1) % RXQ_SIZE;
+            pthread_mutex_unlock(&cn->lock);
+            return 1;
+        }
+        idx = (idx + 1) % RXQ_SIZE;
+    }
+    pthread_mutex_unlock(&cn->lock);
+    return 0;
 }
 
 static int init_conn(uint32_t local_ip, uint32_t remote_ip) {
