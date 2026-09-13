@@ -27,6 +27,7 @@ typedef struct {
     uint32_t credit_offset;
     uint32_t payload_offset;
     uint8_t agg_depth;
+    uint8_t aggregated;
     uint8_t request_kind;
     uint8_t reserved0;
     uint8_t reserved1;

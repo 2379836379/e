@@ -24,6 +24,7 @@
 #define WINDOW        32
 #define RTO_US        50000
 #define END_MAX_RETRIES 64U
+#define REPAIR_MAX_RETRIES 64U
 #define AGTR_ARRAY_SIZE (2 * WINDOW)
 
 #define OP_ALLREDUCE    2

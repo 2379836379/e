@@ -96,6 +96,10 @@ typedef struct {
     uint32_t pending_response_tail;
     uint32_t request_end_tombstone_seq[MAX_ACTIVE_MESSAGES];
     uint8_t request_end_tombstone_valid[MAX_ACTIVE_MESSAGES];
+    /* The current responder loop owns one credit/END state machine per
+     * respond() invocation.  Serialize invocations on the same channel until
+     * that state is made per-message. */
+    pthread_mutex_t responder_lock;
 } host_channel_state_t;
 
 extern config_entry_t g_cfg[MAX_GROUP_SIZE];

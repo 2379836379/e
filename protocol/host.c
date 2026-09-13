@@ -471,6 +471,7 @@ static void *host_rx_thread(void *arg) {
             m->credit_offset = hdrv.offset_b;
             m->payload_offset = hdrv.offset_a;
             m->agg_depth = hdrv.agg_depth;
+            m->aggregated = hdrv.aggregated ? 1u : 0u;
             if (!hdrv.payload_valid && hdrv.packet_type == ARBOR_PKT_DATA_REQUEST) {
                 m->request_kind = ARBOR_REQ_AGGREGATE_CONTROL_ACK;
             } else if (hdrv.packet_type == ARBOR_PKT_DATA_REQUEST && hdrv.payload_valid) {
@@ -612,6 +613,7 @@ int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip) 
     ctx->recv_conn = recv_conn;
     ctx->local_ip = local_ip;
     ctx->responder_ip = responder_ip;
+    pthread_mutex_init(&state->responder_lock, NULL);
 
     for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
         subchannel_ctx_t *sc = &state->subchannels[s];

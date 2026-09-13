@@ -656,9 +656,12 @@ static void commit_primary_response(credit_entry_t *e, void *buf, uint32_t credi
     build_result_payload(channel_id, result_buf, credit_offset, remote_payload, payload_len);
     memcpy((uint8_t *)buf + credit_offset * PAYLOAD_LEN, result_buf, PAYLOAD_LEN);
     memcpy(e->result, result_buf, PAYLOAD_LEN);
+    /* A push/control aggregate has no response payload.  Preserve that
+     * distinction in the replay cache so a duplicate control ACK cannot be
+     * turned into a spurious data response. */
     cache_primary_response(e, message_id, channel_id, subchannel_id,
                            response_credit_offset, payload_offset, agg_loc,
-                           agg_level, agg_valid, fanin, result_buf, PAYLOAD_LEN);
+                           agg_level, agg_valid, fanin, result_buf, payload_len);
     e->committed = 1;
     e->tail_response_valid = 1;
 }
@@ -675,6 +678,13 @@ static int try_enter_repair(uint32_t channel_id, uint32_t subchannel_id,
     const uint8_t *replay_data = NULL;
     uint8_t replay_valid = 0;
     if (!e || e->done) return 0;
+    if (e->retry_count >= REPAIR_MAX_RETRIES) {
+        fprintf(stderr,
+                "[responder-repair-timeout] ch=%u sub=%u offset=%u retries=%u\n",
+                channel_id, e->subchannel_id < SUBCHANNEL_COUNT ? e->subchannel_id : subchannel_id,
+                e->credit_offset, e->retry_count);
+        return -1;
+    }
     if (e->subchannel_id >= SUBCHANNEL_COUNT) e->subchannel_id = subchannel_id;
     if (!e->repair_mode) e->repair_mode = 1;
     now = now_us();
@@ -924,17 +934,20 @@ static void accumulate_requester_input(credit_entry_t *e, uint32_t req_mask,
     for (uint16_t i = 0; i < words; i++) accum[i] += remote[i];
 }
 
-static void maybe_timeout_repair(uint32_t channel_id, uint32_t subchannel_id,
-                                 credit_entry_t *entries, uint16_t fanin,
-                                 uint32_t expected_requester_count) {
+static int maybe_timeout_repair(uint32_t channel_id, uint32_t subchannel_id,
+                                credit_entry_t *entries, uint16_t fanin,
+                                uint32_t expected_requester_count) {
     uint64_t now = now_us();
     for (uint32_t i = 0; i < AGTR_ARRAY_SIZE; i++) {
         credit_entry_t *e = &entries[i];
         if (!e->valid || e->sent_at == 0) continue;
         if (e->subchannel_id != subchannel_id) continue;
         if (now - e->sent_at < RTO_US) continue;
-        (void)try_enter_repair(channel_id, subchannel_id, expected_requester_count, entries, e);
+        if (try_enter_repair(channel_id, subchannel_id, expected_requester_count, entries, e) < 0) {
+            return -1;
+        }
     }
+    return 0;
 }
 
 static int commit_entry_response(uint32_t channel_id, uint32_t subchannel_id,
@@ -1023,11 +1036,22 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!ctx || !state) return -1;
 
+    /* A respond() call currently owns the channel-local credit and END
+     * bookkeeping below.  Do not let a second message reset that state while
+     * this one is still waiting for END_ACKs. */
+    pthread_mutex_lock(&state->responder_lock);
+
     uint32_t total_npkts = size / PAYLOAD_LEN;
-    if (total_npkts == 0) return 0;
+    if (total_npkts == 0) {
+        pthread_mutex_unlock(&state->responder_lock);
+        return 0;
+    }
 
     credit_entry_t *entries = calloc(AGTR_ARRAY_SIZE, sizeof(credit_entry_t));
-    if (!entries) return -1;
+    if (!entries) {
+        pthread_mutex_unlock(&state->responder_lock);
+        return -1;
+    }
 
     uint16_t fanin = (uint16_t)count_bits32(neighbor_mask_of(channel_id));
     if (fanin == 0) fanin = 1;
@@ -1078,7 +1102,12 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             next_progress_log = loop_now + 1000000ULL;
         }
         for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
-            maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count);
+            if (maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count) < 0) {
+                dump_responder_stats(channel_id);
+                free(entries);
+                pthread_mutex_unlock(&state->responder_lock);
+                return -1;
+            }
         }
         issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
         flush_pending_responses(channel_id, fanin, entries);
@@ -1091,6 +1120,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                 fprintf(stderr, "[responder-end-timeout] ch=%u retries=%u end_ack=0x%x expected=0x%x\n",
                         channel_id, end_retries, end_ack_mask, expected_requesters);
                 free(entries);
+                pthread_mutex_unlock(&state->responder_lock);
                 return -1;
             }
             replay_tail_responses(channel_id, fanin, entries);
@@ -1119,7 +1149,12 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             }
 
             for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
-                maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count);
+                if (maybe_timeout_repair(channel_id, s, entries, fanin, expected_requester_count) < 0) {
+                    dump_responder_stats(channel_id);
+                    free(entries);
+                    pthread_mutex_unlock(&state->responder_lock);
+                    return -1;
+                }
             }
             issue_ready_credits_round(channel_id, fanin, entries, next_credit_at, credit_gap_us, credit_window);
 
@@ -1130,6 +1165,7 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                     fprintf(stderr, "[responder-end-timeout] ch=%u retries=%u end_ack=0x%x expected=0x%x\n",
                             channel_id, end_retries, end_ack_mask, expected_requesters);
                     free(entries);
+                    pthread_mutex_unlock(&state->responder_lock);
                     return -1;
                 }
                 replay_tail_responses(channel_id, fanin, entries);
@@ -1160,7 +1196,12 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
                 e->sample_eligible = 0;
                 e->credit_offset = responder_local_to_wire(meta->epoch, local_credit_offset);
                 e->subchannel_id = m.subchannel_id;
-                (void)try_enter_repair(channel_id, m.subchannel_id, expected_requester_count, entries, e);
+                if (try_enter_repair(channel_id, m.subchannel_id, expected_requester_count, entries, e) < 0) {
+                    dump_responder_stats(channel_id);
+                    free(entries);
+                    pthread_mutex_unlock(&state->responder_lock);
+                    return -1;
+                }
                 continue;
             }
 
@@ -1263,24 +1304,93 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
             e->agg_loc = (m.agg_depth > 0) ? m.agg_stack[m.agg_depth - 1] : 0;
             if ((m.flags & ARBOR_FLAG_ECN) != 0) e->ce_seen = 1;
 
-            if (e->committed) {
-                replay_completion_response(e, channel_id, m.subchannel_id, fanin);
-                continue;
-            }
-
             uint32_t req_mask = requester_mask_from_ip(m.src_ip);
             const int allow_normal_single = expected_requester_count <= 1;
             const int from_repair = (m.msg_type == ARBOR_MSG_REPAIR_REQUEST);
+
+            /* Aggregated masters are the only normal path for fan-in > 1.
+             * offsetB carries the contribution count after the last router
+             * level; accepting a forged/partial master would let the entry
+             * commit permanently without all requesters represented. */
+            if (!from_repair && m.request_kind == ARBOR_REQ_AGGREGATE_PAYLOAD &&
+                ((!m.aggregated && expected_requester_count > 1) ||
+                 (m.aggregated && m.credit_offset != expected_requester_count))) {
+                fprintf(stderr,
+                        "[responder-request-drop] ch=%u sub=%u reason=invalid-aggregate-master payload_off=%u aggregated=%u contribution=%u expect=%u src_rank=%d\n",
+                        channel_id, m.subchannel_id, m.payload_offset,
+                        (unsigned)m.aggregated, m.credit_offset,
+                        expected_requester_count, rank_of_ip(m.src_ip));
+                continue;
+            }
+            if (!from_repair && m.aggregated && e->repair_mode) {
+                /* Repair mode is an atomic path switch.  A late normal master
+                 * must not race the repair accumulator or commit a second
+                 * result. */
+                fprintf(stderr,
+                        "[responder-request-drop] ch=%u sub=%u reason=repair-mode payload_off=%u src_rank=%d\n",
+                        channel_id, m.subchannel_id, m.payload_offset,
+                        rank_of_ip(m.src_ip));
+                continue;
+            }
             uint32_t ready_bitmap = 0;
             const uint8_t *accum_payload = NULL;
             completion_kind_t completion_kind = COMPLETION_KIND_DIRECT;
 
+            if (m.aggregated && m.request_kind == ARBOR_REQ_AGGREGATE_CONTROL_ACK &&
+                m.credit_offset != expected_requester_count) {
+                fprintf(stderr,
+                        "[responder-request-drop] ch=%u sub=%u reason=invalid-aggregate-control payload_off=%u contribution=%u expect=%u src_rank=%d\n",
+                        channel_id, m.subchannel_id, m.payload_offset,
+                        m.credit_offset, expected_requester_count,
+                        rank_of_ip(m.src_ip));
+                continue;
+            }
 
-            if (m.request_kind == ARBOR_REQ_AGGREGATE_CONTROL_ACK && m.payload_len == 0) {
+            /* A push aggregate is a header-only consumption ACK.  It still
+             * completes the credit, but must never be replayed as a payload
+             * request.  For an already committed entry this is just the
+             * implicit ACK; otherwise commit a completion-only response. */
+            if (m.aggregated && m.request_kind == ARBOR_REQ_AGGREGATE_CONTROL_ACK &&
+                m.payload_len == 0) {
                 fprintf(stderr,
                         "[responder-control-ack] ch=%u sub=%u msg=%u payload_off=%u credit_off=%u src_rank=%d\n",
                         channel_id, m.subchannel_id, (unsigned)m.message_id,
                         m.payload_offset, m.credit_offset, rank_of_ip(m.src_ip));
+                e->ce_seen = e->ce_seen || ((m.flags & ARBOR_FLAG_ECN) != 0);
+                e->requester_bitmap = expected_requesters;
+                if (e->committed) {
+                    (void)mark_entry_done(channel_id, e, expected_requesters, &done_count);
+                } else {
+                    g_responder_stats[m.subchannel_id].request_commit++;
+                    if (commit_entry_response(channel_id, m.subchannel_id,
+                                              expected_requesters, local_credit_offset,
+                                              fanin, buf, msg_meta, entries, e,
+                                              NULL, 0, &next_credit_at[m.subchannel_id],
+                                              &credit_gap_us[m.subchannel_id],
+                                              &credit_window[m.subchannel_id], &done_count,
+                                              COMPLETION_KIND_DIRECT, 0)) {
+                        issue_ready_credits_round(channel_id, fanin, entries,
+                                                  next_credit_at, credit_gap_us,
+                                                  credit_window);
+                    }
+                }
+                if (!end_sent && done_count >= total_npkts) {
+                    for (uint32_t s = 0; s < SUBCHANNEL_COUNT; s++) {
+                        if (!register_message_id_valid[s]) continue;
+                        protocol_message_t *meta = response_message_by_id(channel_id, register_message_id[s]);
+                        if (meta) meta->complete = 1;
+                    }
+                    send_end_all(channel_id, register_message_id,
+                                 register_message_id_valid, register_epoch,
+                                 register_epoch_valid);
+                    end_sent = 1;
+                    end_sent_at = now_us();
+                }
+                continue;
+            }
+
+            if (e->committed) {
+                replay_completion_response(e, channel_id, m.subchannel_id, fanin);
                 continue;
             }
             if (from_repair) {
@@ -1350,5 +1460,6 @@ int respond(uint32_t channel_id, void *buf, uint32_t size, uint8_t op) {
     flush_send_queue();
     dump_responder_stats(channel_id);
     free(entries);
+    pthread_mutex_unlock(&state->responder_lock);
     return (int)size;
 }

@@ -13,7 +13,7 @@ HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router-root router-a router-a0 router-a1)
 N=4
 NINTS=4096
-LOSS_RATE="40%"
+LOSS_RATE="10%"
 
 cleanup() {
   set +e

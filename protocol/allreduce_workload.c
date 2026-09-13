@@ -16,6 +16,7 @@ typedef struct {
     uint8_t *src_slice;
     uint8_t *dst_slice;
     uint32_t slice_bytes;
+    int status;
 } allreduce_task_t;
 
 static int init_host_channel_for_allreduce(const lab_config_t *config, int rank,
@@ -68,21 +69,24 @@ static void write_output(const char *config_path, int rank, const int32_t *buf, 
 
 static void *allreduce_worker(void *arg) {
     allreduce_task_t *task = (allreduce_task_t *)arg;
+    int rc;
+    task->status = -1;
     register_local_source(task->channel_id, task->src_slice, task->slice_bytes, OP_ALLREDUCE);
     register_request_result(task->channel_id, task->dst_slice, task->slice_bytes);
 
     if (task->rank == (int)task->channel_id) {
         fprintf(stderr, "[host] rank%d acts as responder for channel %u (%u bytes)\n",
                 task->rank, task->channel_id, task->slice_bytes);
-        respond(task->channel_id, task->dst_slice, task->slice_bytes, OP_ALLREDUCE);
+        rc = respond(task->channel_id, task->dst_slice, task->slice_bytes, OP_ALLREDUCE);
     } else {
         fprintf(stderr, "[host] rank%d acts as requester for channel %u -> responder rank %u (%u bytes)\n",
                 task->rank, task->channel_id, task->channel_id, task->slice_bytes);
-        request(task->channel_id, task->src_slice, task->slice_bytes, OP_ALLREDUCE);
+        rc = request(task->channel_id, task->src_slice, task->slice_bytes, OP_ALLREDUCE);
     }
 
     clear_request_result(task->channel_id);
     clear_local_source(task->channel_id);
+    task->status = (rc < 0) ? -1 : 0;
     return NULL;
 }
 
@@ -99,6 +103,7 @@ int lab_run_host_allreduce(const lab_config_t *config, const char *host_name,
     uint32_t rem_npkts;
     uint32_t pkt_cursor;
     uint32_t channel_id;
+    int failed = 0;
 
     if (!config || !host_name || !config_path) return 1;
     init_host((config_entry_t *)config->entries, config->count, host_name);
@@ -154,11 +159,19 @@ int lab_run_host_allreduce(const lab_config_t *config, const char *host_name,
 
     for (channel_id = 0; channel_id < (uint32_t)config->count; ++channel_id) {
         pthread_join(tids[channel_id], NULL);
+        if (tasks[channel_id].status != 0) failed = 1;
     }
 
     /* Keep the host control plane alive to answer retransmitted END packets
      * after requester workers have released their request messages. */
     host_wait_for_end_quiet();
+
+    if (failed) {
+        fprintf(stderr, "[host] rank%d allreduce failed\n", rank);
+        free(src);
+        free(dst);
+        return 1;
+    }
 
     write_output(config_path, rank, dst, nints);
     printf("[host] rank%d allreduce done (%u channels, %u packets total, concurrent)\n",

@@ -337,6 +337,13 @@ int request(uint32_t channel_id, const void *buf, uint32_t size, uint8_t op) {
                     }
                 }
                 if (completion_valid && m.payload_len > 0 && payload_meta == msg) {
+                    /* Reference semantics: the first payload response also
+                     * confirms REGISTER for this subchannel, even when the
+                     * response carries no credit. */
+                    if (m.subchannel_id < SUBCHANNEL_COUNT) {
+                        register_acked[m.subchannel_id] = 1;
+                        msg->register_acked_mask |= (uint8_t)(1u << m.subchannel_id);
+                    }
                     stats[m.subchannel_id].payload_recv++;
                     store_response_payload(channel_id, local_payload_offset, m.payload, m.payload_len);
                     if (!completed[local_payload_offset]) {
