@@ -11,6 +11,10 @@ HOSTS=(host1 host2 host3 host4 host5 host6 host7 host8)
 ROUTERS=(router-root router-l router-r router-ll router-lr router-rl router-rr)
 N=8
 NINTS=32768
+LOSS_RATE="10%"
+# The workload uses 8192-byte packets, i.e. 2048 int32 values per packet.
+PACKET_INTS=2048
+TOTAL_PACKETS=$(( (NINTS + PACKET_INTS - 1) / PACKET_INTS ))
 cleanup_in_progress=0
 
 cleanup() {
@@ -49,6 +53,18 @@ bash "$SCRIPT_DIR/helper.sh" gen "$N" "$NINTS"
 bash "$SCRIPT_DIR/helper.sh" sum "$N"
 bash "$ROOT/topology/tree3/setup.sh" clean >/dev/null 2>&1 || true
 bash "$ROOT/topology/tree3/setup.sh" setup
+
+for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do
+  for dev in $(docker exec "$c" ip -o link show |
+      awk -F": " '$2 != "lo" {print $2}' | cut -d@ -f1); do
+    case "$dev" in
+      eth0|lo) continue ;;
+    esac
+    docker exec "$c" tc qdisc replace dev "$dev" root netem loss "$LOSS_RATE"
+  done
+done
+echo "configured ${LOSS_RATE} packet loss on topology interfaces"
+
 for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do
   docker exec "$c" mkdir -p /app/build /app/tests/out /app/tests/data/current
   docker exec "$c" rm -f /app/tests/out/output-*.data /app/tests/out/*.log
@@ -61,8 +77,9 @@ for r in $(seq 0 $((N - 1))); do
   h=${HOSTS[$r]}
   docker exec -d "$h" bash -lc "cd /app && ./build/inc $h $CFG_PATH allreduce > tests/out/$h.log 2>&1"
 done
+
 finished=0
-for _ in $(seq 1 240); do
+for _ in $(seq 1 600); do
   ready=1
   for r in $(seq 0 $((N - 1))); do
     h=${HOSTS[$r]}
@@ -78,17 +95,38 @@ for _ in $(seq 1 240); do
   sleep 1
 done
 if [ "$finished" -ne 1 ]; then
-  echo 'allreduce tree3 test timed out waiting for output files' >&2
+  echo 'allreduce tree3 loss test timed out waiting for output files' >&2
 fi
-missing=0
+
+end_closed=1
 for r in $(seq 0 $((N - 1))); do
   h=${HOSTS[$r]}
+  if ! grep -q "\[host\] rank${r} allreduce done" "$OUT_DIR/$h.log"; then
+    echo "worker rank${r} did not finish on $h" >&2
+    end_closed=0
+  fi
+  summary=$(awk -v channel="ch=$r" 'index($0,"[responder-summary]") && index($0,channel) { found=1; for (i=1;i<=NF;i++) { if ($i ~ /^request_commit=/) { split($i,a,"="); req+=a[2] } if ($i ~ /^repair_commit=/) { split($i,a,"="); rep+=a[2] } } } END { if (found) print req+rep; else print "NA" }' "$OUT_DIR/$h.log")
+  expected_commits=$((TOTAL_PACKETS / N))
+  if [ "$r" -lt "$((TOTAL_PACKETS % N))" ]; then
+    expected_commits=$((expected_commits + 1))
+  fi
+  if [ "$summary" = "NA" ]; then
+    echo "responder ch=$r produced no summary (likely timeout or crash)" >&2
+    end_closed=0
+  elif [ "$summary" -ne "$expected_commits" ]; then
+    echo "responder ch=$r committed ${summary}/${expected_commits} credits" >&2
+    end_closed=0
+  fi
+done
+
+missing=0
+for r in $(seq 0 $((N - 1))); do
   if [ ! -f "$OUT_DIR/output-$r.data" ]; then
-    echo "missing output-$r.data from $h" >&2
+    echo "missing output-$r.data from ${HOSTS[$r]}" >&2
     missing=1
   fi
 done
-if [ "$finished" -ne 1 ] || [ "$missing" -ne 0 ]; then
+if [ "$finished" -ne 1 ] || [ "$end_closed" -ne 1 ] || [ "$missing" -ne 0 ]; then
   echo 'test artifacts were collected under tests/out' >&2
   exit 1
 fi
