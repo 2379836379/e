@@ -11,7 +11,7 @@ HOSTS=(host1 host2 host3 host4 host5 host6 host7 host8)
 ROUTERS=(router-root router-l router-r router-ll router-lr router-rl router-rr)
 N=8
 NINTS=32768
-LOSS_RATE="10%"
+LOSS_RATE="20%"
 # The workload uses 8192-byte packets, i.e. 2048 int32 values per packet.
 PACKET_INTS=2048
 TOTAL_PACKETS=$(( (NINTS + PACKET_INTS - 1) / PACKET_INTS ))

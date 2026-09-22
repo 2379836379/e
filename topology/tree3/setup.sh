@@ -149,7 +149,10 @@ EOF
       local_leaf=$((r / 2)); local_major=$((r / 4));
       if [ "$leaf" -eq "$local_leaf" ]; then fan0=1; else fan0=2; fi
       if [ "$major" -eq "$local_major" ]; then fan1=3; else fan1=4; fi
-      for sub in 0 1; do echo "req,$r,$rank,$sub,3,$fan0,$fan1,7" >> "$cfg"; done
+      # The complete binary tree aggregates at root, middle, and leaf.
+      # The router consumes the last stack entry first, so emit fanins in
+      # root-to-leaf order.
+      for sub in 0 1; do echo "req,$r,$rank,$sub,3,7,$fan1,$fan0" >> "$cfg"; done
     done
   done
 }
