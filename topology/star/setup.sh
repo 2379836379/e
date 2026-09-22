@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+MTU=9000
+
 hosts=(host1 host2 host3 host4)
 routers=(router1 router2)
 nodes=("${routers[@]}" "${hosts[@]}")
@@ -39,6 +41,8 @@ setup() {
     docker exec "$c2" ip link set "${v2}_tmp" name "$v2"
     docker exec "$c1" ip link set "$v1" up
     docker exec "$c2" ip link set "$v2" up
+    docker exec "$c1" ip link set dev "$v1" mtu "$MTU"
+    docker exec "$c2" ip link set dev "$v2" mtu "$MTU"
     docker exec "$c1" ip link set dev "$v1" promisc on
     docker exec "$c2" ip link set dev "$v2" promisc on
   done

@@ -9,7 +9,7 @@ HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router1)
 CFG=topology/star1/ranks.cfg
 N=4
-NINTS=4096
+NINTS=32768
 LOSS_RATE="20%"
 
 cleanup() {

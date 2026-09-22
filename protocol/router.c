@@ -622,7 +622,15 @@ static void slot_accumulate_payload(router_slot_t *slot, const uint8_t *payload,
     if (!accum) return;
     src = (const int32_t *)payload;
     words = payload_len / (uint16_t)sizeof(int32_t);
-    for (uint16_t i = 0; i < words; ++i) accum[i] += src[i];
+    for (uint16_t i = 0; i < words; ++i) {
+        if (slot->op == ARBOR_OP_MAX) {
+            if (src[i] > accum[i]) accum[i] = src[i];
+        } else if (slot->op == ARBOR_OP_MIN) {
+            if (src[i] < accum[i]) accum[i] = src[i];
+        } else {
+            accum[i] += src[i];
+        }
+    }
 }
 
 static void slot_or_ecn(router_slot_t *slot, const uint8_t *frame) {
@@ -634,6 +642,7 @@ static void slot_or_ecn(router_slot_t *slot, const uint8_t *frame) {
         ip_header_t *master_ip = (ip_header_t *)(slot->master_frame + sizeof(eth_header_t));
         master_ip->tos = (uint8_t)((master_ip->tos & ~ARBOR_IPV4_ECN_MASK) |
                                    ((master_ip->tos & ARBOR_IPV4_ECN_MASK) | (ip->tos & ARBOR_IPV4_ECN_MASK)));
+        arbor_recompute_ip_checksum(master_ip);
     }
 }
 
@@ -862,6 +871,7 @@ void INC(void) {
             uint8_t level_fanin = hdr.fanins[level];
             router_slot_t *slot = &g_slots[level_agg_loc];
             slot_fail_reason_t fail_reason = SLOT_FAIL_NONE;
+            const int slot_was_empty = slot->agg_count == 0;
             int final = slot_accept(slot, udp_port, hdr.offset_a, level_fanin,
                                     hdr.aggregated, hdr.aggregated ? hdr.offset_b : 0,
                                     hdr.op, hdr.dtype, payload_len,
@@ -883,9 +893,16 @@ void INC(void) {
                                            subchannel_id, ip->dst_ip);
                 continue;
             }
-            slot_accumulate_payload(slot,
-                pk.data + sizeof(eth_header_t) + ip_ihl + sizeof(udp_header_t) + sizeof(arbor_header_t),
-                payload_len);
+            {
+                const uint8_t *incoming = pk.data + sizeof(eth_header_t) + ip_ihl +
+                                           sizeof(udp_header_t) + sizeof(arbor_header_t);
+                if (slot_was_empty && (slot->op == ARBOR_OP_MAX || slot->op == ARBOR_OP_MIN) &&
+                    payload_len > 0) {
+                    memcpy(slot_payload(slot), incoming, payload_len);
+                } else {
+                    slot_accumulate_payload(slot, incoming, payload_len);
+                }
+            }
             slot_or_ecn(slot, pk.data);
             if (!final) {
                 fprintf(stderr,

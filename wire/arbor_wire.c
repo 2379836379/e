@@ -1,18 +1,5 @@
 #include "wire/arbor_wire.h"
 
-static uint16_t ip_checksum(const void *data, int len) {
-    const uint8_t *p = (const uint8_t *)data;
-    uint32_t sum = 0;
-    int i;
-    for (i = 0; i + 1 < len; i += 2)
-        sum += (uint16_t)((p[i] << 8) | p[i + 1]);
-    if (len & 1)
-        sum += (uint16_t)(p[len - 1] << 8);
-    while (sum >> 16)
-        sum = (sum & 0xffff) + (sum >> 16);
-    return (uint16_t)(~sum & 0xffff);
-}
-
 static arbor_packet_type_t legacy_msg_type_to_packet_type(uint8_t msg_type) {
     switch (msg_type) {
         case ARBOR_MSG_REGISTER: return ARBOR_PKT_REGISTER;
@@ -30,7 +17,10 @@ static arbor_packet_type_t legacy_msg_type_to_packet_type(uint8_t msg_type) {
 }
 
 uint16_t mtp_udp_port(uint32_t channel_id, uint32_t subchannel_id) {
-    const uint32_t group_id = 0;
+    return mtp_udp_port_group(0, channel_id, subchannel_id);
+}
+
+uint16_t mtp_udp_port_group(uint32_t group_id, uint32_t channel_id, uint32_t subchannel_id) {
     const uint32_t encoded_subchannel = subchannel_id % MTP_MAX_SUBCHANNELS;
     return (uint16_t)(MTP_UDP_PORT_BASE +
                       ((group_id * MTP_MAX_RANKS_PER_GROUP) +
@@ -58,12 +48,17 @@ uint32_t mtp_port_to_subchannel(uint16_t udp_port) {
     return (uint32_t)(udp_port - MTP_UDP_PORT_BASE) % MTP_MAX_SUBCHANNELS;
 }
 
-int build_frame_ex(uint8_t *buf,
+uint32_t mtp_port_to_channel_key(uint16_t udp_port) {
+    return ((uint32_t)(udp_port - MTP_UDP_PORT_BASE) / MTP_MAX_SUBCHANNELS);
+}
+
+int build_frame_ex_meta(uint8_t *buf,
                    uint32_t src_ip, uint32_t dst_ip,
                    uint8_t msg_type, uint8_t flags,
                    uint32_t channel_id, uint32_t subchannel_id,
                    uint32_t credit_offset, uint32_t payload_offset,
                    uint8_t agg_depth, const uint32_t *agg_stack, const uint8_t *fanin_vec, uint8_t request_kind,
+                   uint8_t op, uint8_t dtype, arbor_payload_kind_t payload_kind,
                    const void *payload, uint16_t plen) {
     eth_header_t *eth = (eth_header_t *)buf;
     (void)request_kind;
@@ -93,7 +88,7 @@ int build_frame_ex(uint8_t *buf,
     ip->checksum = 0;
     ip->src_ip = src_ip;
     ip->dst_ip = dst_ip;
-    ip->checksum = htons(ip_checksum(ip, sizeof(ip_header_t)));
+    arbor_recompute_ip_checksum(ip);
 
     udp_header_t *udp = (udp_header_t *)(buf + sizeof(eth_header_t) + sizeof(ip_header_t));
     udp->src_port = htons(mtp_udp_port(channel_id, subchannel_id));
@@ -105,10 +100,8 @@ int build_frame_ex(uint8_t *buf,
     memset(mtp, 0, sizeof(*mtp));
     const arbor_packet_type_t pkt_type = legacy_msg_type_to_packet_type(msg_type);
     const int repair = (flags & 0x1U) != 0;
-    const uint8_t op = (uint8_t)(OP_ALLREDUCE & 0x3U);
     const uint8_t depth = agg_depth > ARBOR_MAX_STACK_DEPTH ? ARBOR_MAX_STACK_DEPTH : agg_depth;
     const int payload_valid = plen > 0;
-    const arbor_payload_kind_t payload_kind = payload_valid ? ARBOR_PAYLOAD_DATA : ARBOR_PAYLOAD_COMPLETION;
     const int credit_valid = (flags & 0x4U) != 0;
     const int aggregated = 0;
 
@@ -122,12 +115,27 @@ int build_frame_ex(uint8_t *buf,
         arbor_store_fanin_at((uint8_t *)mtp, i, (fanin_vec && i < depth) ? fanin_vec[i] : 0);
     }
     ((uint8_t *)mtp)[kArborReservedOffset] = 0;
-    arbor_store_dtype((uint8_t *)mtp, payload_valid ? ARBOR_DTYPE_FLOAT32 : 0);
+    arbor_store_dtype((uint8_t *)mtp, dtype);
 
     if (plen > 0 && payload)
         memcpy(buf + HDR_LEN, payload, plen);
 
     return (int)(HDR_LEN + plen);
+}
+
+int build_frame_ex(uint8_t *buf,
+                   uint32_t src_ip, uint32_t dst_ip,
+                   uint8_t msg_type, uint8_t flags,
+                   uint32_t channel_id, uint32_t subchannel_id,
+                   uint32_t credit_offset, uint32_t payload_offset,
+                   uint8_t agg_depth, const uint32_t *agg_stack, const uint8_t *fanin_vec, uint8_t request_kind,
+                   const void *payload, uint16_t plen) {
+    return build_frame_ex_meta(buf, src_ip, dst_ip, msg_type, flags,
+                               channel_id, subchannel_id, credit_offset,
+                               payload_offset, agg_depth, agg_stack, fanin_vec,
+                               request_kind, OP_ALLREDUCE, ARBOR_DTYPE_FLOAT32,
+                               ARBOR_PAYLOAD_DATA,
+                               payload, plen);
 }
 
 arbor_router_action_t classify_router_request(uint8_t msg_type, uint8_t agg_depth,

@@ -6,7 +6,7 @@
 
 #define INVALID_OFFSET 0xffffffffu
 #define FIXED_RS_CREDITS_PER_SEC 2000ULL
-#define FIXED_STARTUP_WINDOW 4U
+#define FIXED_STARTUP_WINDOW 16U
 #define CC_MIN_WINDOW 1U
 #define CC_MAX_WINDOW WINDOW
 #define CC_MAX_GAP_US (RTO_US / 2U)
@@ -27,6 +27,8 @@ typedef struct responder_call_ctx {
     uint8_t pending_response_message_ids[PENDING_RESPONSE_QUEUE_SIZE];
     uint32_t pending_response_head;
     uint32_t pending_response_tail;
+    uint8_t op;
+    uint8_t dtype;
 } responder_call_ctx_t;
 
 static __thread responder_call_ctx_t *g_call_ctx;
@@ -145,6 +147,8 @@ typedef struct {
     uint8_t ce_seen;
     uint8_t repair_mode;
     uint8_t repair_replay_valid;
+    uint8_t op;
+    uint8_t dtype;
 
     uint32_t credit_offset;
     uint32_t local_credit_offset;
@@ -183,7 +187,7 @@ typedef struct {
 
 static responder_stats_t g_responder_stats[SUBCHANNEL_COUNT];
 
-#define RESPONDER_SENDQ_SIZE 32768
+#define RESPONDER_SENDQ_SIZE 2048
 
 typedef struct {
     uint8_t valid;
@@ -325,12 +329,15 @@ static void send_response_frame(uint32_t dst_ip, uint8_t message_id,
     (void)agg_level;
     (void)agg_valid;
     (void)fanin;
-    int len = build_frame_ex(frame,
+    int len = build_frame_ex_meta(frame,
                              g_my_ip, dst_ip,
                              ARBOR_MSG_RESPONSE, flags,
                              channel_id, subchannel_id,
                              credit_offset, payload_offset, 0, zero_stack, zero_fanin,
-                             ARBOR_REQ_NONE, payload, plen);
+                             ARBOR_REQ_NONE,
+                             g_call_ctx ? g_call_ctx->op : OP_ALLREDUCE,
+                             g_call_ctx ? g_call_ctx->dtype : ARBOR_DTYPE_INT32,
+                             payload_kind, payload, plen);
     arbor_hdr = frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t);
     hdr = arbor_parse_header(arbor_hdr);
     hdr.message_id = message_id;
@@ -650,12 +657,20 @@ static void build_result_payload(uint32_t channel_id, uint8_t *result_buf, uint3
 
     host_channel_state_t *state = find_channel_state(channel_id);
     if (state && state->local_src_buf && credit_offset < state->local_src_npkts) {
-        memcpy(result, state->local_src_buf + credit_offset * PAYLOAD_LEN, PAYLOAD_LEN);
+        uint16_t local_len = arbor_payload_len(state->local_src_bytes, credit_offset);
+        memcpy(result, state->local_src_buf + credit_offset * PAYLOAD_LEN, local_len);
     }
     if (remote_payload && payload_len > 0) {
         const int32_t *remote = (const int32_t *)remote_payload;
         uint16_t words = payload_len / (uint16_t)sizeof(int32_t);
-        for (uint16_t i = 0; i < words; i++) result[i] += remote[i];
+        uint8_t op = state ? state->local_src_op : ARBOR_OP_SUM;
+        const int32_t *local = (state && state->local_src_buf && credit_offset < state->local_src_npkts)
+            ? (const int32_t *)(state->local_src_buf + credit_offset * PAYLOAD_LEN) : NULL;
+        for (uint16_t i = 0; i < words; i++) {
+            if (op == ARBOR_OP_MAX) result[i] = local && local[i] > remote[i] ? local[i] : remote[i];
+            else if (op == ARBOR_OP_MIN) result[i] = local && local[i] < remote[i] ? local[i] : remote[i];
+            else result[i] += remote[i];
+        }
     }
 
     if (payload_len > 0 && channel_id == 0 && credit_offset < 4) {
@@ -795,6 +810,7 @@ static int reserve_credit(uint32_t channel_id, protocol_message_t *meta, uint32_
         e->agg_loc = 0;
         e->local_credit_offset = local_credit_offset;
         e->owner_message_id = meta->message_id;
+        e->op = g_call_ctx ? g_call_ctx->op : OP_ALLREDUCE;
         meta->next_credit_offset = local_credit_offset + 1;
         if (reserved_entry_out) *reserved_entry_out = e;
         *credit_offset_out = credit_offset;
@@ -991,6 +1007,7 @@ static void accumulate_requester_input(credit_entry_t *e, uint32_t req_mask,
     uint32_t *count = is_repair ? &e->repair_contrib_count : &e->direct_contrib_count;
 
     if (contribution == 0) contribution = 1;
+    const uint32_t prior_count = *count;
     if (req_mask && (*bitmap & req_mask)) return;
     if (req_mask) *bitmap |= req_mask;
     *count += contribution;
@@ -998,7 +1015,19 @@ static void accumulate_requester_input(credit_entry_t *e, uint32_t req_mask,
 
     const int32_t *remote = (const int32_t *)payload;
     uint16_t words = payload_len / (uint16_t)sizeof(int32_t);
-    for (uint16_t i = 0; i < words; i++) accum[i] += remote[i];
+    if ((e->op == ARBOR_OP_MAX || e->op == ARBOR_OP_MIN) && prior_count == 0) {
+        memcpy(accum, remote, (size_t)words * sizeof(int32_t));
+        return;
+    }
+    for (uint16_t i = 0; i < words; i++) {
+        if (e->op == ARBOR_OP_MAX) {
+            if (remote[i] > accum[i]) accum[i] = remote[i];
+        } else if (e->op == ARBOR_OP_MIN) {
+            if (remote[i] < accum[i]) accum[i] = remote[i];
+        } else {
+            accum[i] += remote[i];
+        }
+    }
 }
 
 static int maybe_timeout_repair(uint32_t channel_id, uint32_t subchannel_id,
@@ -1110,7 +1139,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
     uint8_t target_message_id;
     int id_reserved = 0;
     uint32_t expected_epoch;
-    uint32_t total_npkts = size / PAYLOAD_LEN;
+    uint32_t total_npkts = arbor_packet_count(size);
     if (!ctx || !state) return -1;
     if (total_npkts == 0) return 0;
 
@@ -1137,6 +1166,8 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
     pthread_mutex_unlock(&state->responder_lock);
     if (!id_reserved) return -1;
     call_ctx.message_id = target_message_id;
+    call_ctx.op = op;
+    call_ctx.dtype = ARBOR_DTYPE_INT32;
     g_call_ctx = &call_ctx;
 
     pthread_mutex_lock(&state->responder_lock);
@@ -1295,7 +1326,7 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
 
             if (m.msg_type == ARBOR_MSG_AGG_MISS) {
                 uint32_t local_credit_offset;
-                protocol_message_t *meta = find_response_message_for_sequence(channel_id, m.credit_offset,
+                protocol_message_t *meta = find_response_message_for_sequence(channel_id, m.payload_offset,
                                                                               &local_credit_offset);
                 if (!meta || meta->message_id != m.message_id) continue;
                 credit_entry_t *e = find_entry(entries, m.payload_offset);
@@ -1414,12 +1445,29 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                 continue;
             }
             e->payload_offset = local_payload_offset;
+            if (m.dtype != ARBOR_DTYPE_INT32 && m.dtype != ARBOR_DTYPE_FLOAT32) {
+                fprintf(stderr, "[responder-request-drop] ch=%u sub=%u reason=unsupported-dtype dtype=%u\n",
+                        channel_id, m.subchannel_id, (unsigned)m.dtype);
+                continue;
+            }
+            if (!e->committed && e->direct_contrib_count == 0 && e->repair_contrib_count == 0) {
+                e->op = m.op;
+                e->dtype = m.dtype;
+            }
             e->agg_loc = (m.agg_depth > 0) ? m.agg_stack[m.agg_depth - 1] : 0;
             if ((m.flags & ARBOR_FLAG_ECN) != 0) e->ce_seen = 1;
 
             uint32_t req_mask = requester_mask_from_ip(m.src_ip);
             const int allow_normal_single = expected_requester_count <= 1;
             const int from_repair = (m.msg_type == ARBOR_MSG_REPAIR_REQUEST);
+
+            if (!from_repair && expected_requester_count > 1 &&
+                !m.aggregated && m.agg_depth == 0) {
+                fprintf(stderr,
+                        "[responder-request-drop] ch=%u sub=%u reason=missing-aggregate-stack payload_off=%u\n",
+                        channel_id, m.subchannel_id, m.payload_offset);
+                continue;
+            }
 
             /* Aggregated masters are the only normal path for fan-in > 1.
              * offsetB carries the contribution count after the last router
@@ -1554,7 +1602,8 @@ static int respond_mode(uint32_t channel_id, void *buf, uint32_t size,
                 }
                 if (commit_entry_response(channel_id, m.subchannel_id, expected_requesters,
                                           local_credit_offset, fanin, buf, msg_meta,
-                                          entries, e, accum_payload, PAYLOAD_LEN,
+                                          entries, e, accum_payload,
+                                          arbor_payload_len(size, local_credit_offset),
                                           &next_credit_at[m.subchannel_id],
                                           &credit_gap_us[m.subchannel_id],
                                           &credit_window[m.subchannel_id], &done_count,

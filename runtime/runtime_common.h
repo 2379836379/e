@@ -29,6 +29,9 @@ typedef struct {
     uint8_t agg_depth;
     uint8_t aggregated;
     uint8_t request_kind;
+    uint8_t op;
+    uint8_t dtype;
+    uint8_t payload_kind;
     uint8_t reserved0;
     uint8_t reserved1;
     uint32_t agg_stack[ARBOR_MAX_STACK_DEPTH];
@@ -39,7 +42,7 @@ typedef struct {
     uint8_t payload[PAYLOAD_LEN];
 } __attribute__((packed)) rx_msg_t;
 
-#define RXQ_SIZE 8192
+#define RXQ_SIZE 256
 typedef struct {
     int in_use;
     uint32_t local_ip;
@@ -50,7 +53,7 @@ typedef struct {
     pthread_mutex_t lock;
 } conn_t;
 
-#define DEV_BUF_SIZE 4096
+#define DEV_BUF_SIZE (HDR_LEN + PAYLOAD_LEN)
 #define PCAP_BUFFER_SIZE (16 * 1024 * 1024)
 typedef struct dev_buffer_t dev_buffer_t;
 typedef struct {
@@ -70,7 +73,7 @@ typedef struct {
     uint32_t len;
 } dev_pkt_t;
 
-#define DEV_RING_SIZE 65536
+#define DEV_RING_SIZE 1024
 struct dev_buffer_t {
     dev_pkt_t packets[DEV_RING_SIZE];
     volatile int head;

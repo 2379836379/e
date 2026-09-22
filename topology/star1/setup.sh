@@ -1,5 +1,7 @@
 #!/bin/bash
 set -euo pipefail
+
+MTU=9000
 hosts=(host1 host2 host3 host4)
 routers=(router1)
 nodes=("${routers[@]}" "${hosts[@]}")
@@ -28,6 +30,8 @@ setup() {
     docker exec "$c2" ip link set "${v2}_tmp" name "$v2"
     docker exec "$c1" ip link set "$v1" up
     docker exec "$c2" ip link set "$v2" up
+    docker exec "$c1" ip link set dev "$v1" mtu "$MTU"
+    docker exec "$c2" ip link set dev "$v2" mtu "$MTU"
   done
   for r in 1 2 3 4; do docker exec host$r ip addr add "10.1.0.$r/24" dev host$r-eth0; done
 }

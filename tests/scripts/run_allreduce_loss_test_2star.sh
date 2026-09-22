@@ -12,7 +12,7 @@ CFG_PATH="topology/star/ranks.cfg"
 HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router1 router2)
 N=4
-NINTS=4096
+NINTS=32768
 LOSS_RATE="20%"
 
 cleanup() {

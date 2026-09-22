@@ -74,6 +74,14 @@ int g_conn_count = 0;
 static host_channel_state_t g_channel_states[MAX_CHANNELS];
 static int g_channel_state_count = 0;
 
+static channel_ctx_t *find_channel_group(uint32_t group_id, uint32_t channel_id) {
+    for (int i = 0; i < g_channel_state_count; ++i) {
+        channel_ctx_t *ctx = &g_channel_states[i].channel;
+        if (ctx->active && ctx->group_id == group_id && ctx->channel_id == channel_id) return ctx;
+    }
+    return NULL;
+}
+
 host_channel_state_t *find_channel_state(uint32_t channel_id) {
     for (int i = 0; i < g_channel_state_count; i++) {
         if (g_channel_states[i].channel.active && g_channel_states[i].channel.channel_id == channel_id) {
@@ -119,7 +127,8 @@ void register_local_source(uint32_t channel_id, const void *buf, uint32_t size, 
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state) return;
     state->local_src_buf = (const uint8_t *)buf;
-    state->local_src_npkts = size / PAYLOAD_LEN;
+    state->local_src_bytes = size;
+    state->local_src_npkts = arbor_packet_count(size);
     state->local_src_op = op;
 }
 
@@ -127,6 +136,7 @@ void clear_local_source(uint32_t channel_id) {
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state) return;
     state->local_src_buf = NULL;
+    state->local_src_bytes = 0;
     state->local_src_npkts = 0;
     state->local_src_op = 0;
 }
@@ -135,13 +145,15 @@ void register_request_result(uint32_t channel_id, void *buf, uint32_t size) {
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state) return;
     state->request_result_buf = (uint8_t *)buf;
-    state->request_result_npkts = size / PAYLOAD_LEN;
+    state->request_result_bytes = size;
+    state->request_result_npkts = arbor_packet_count(size);
 }
 
 void clear_request_result(uint32_t channel_id) {
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state) return;
     state->request_result_buf = NULL;
+    state->request_result_bytes = 0;
     state->request_result_npkts = 0;
 }
 
@@ -422,6 +434,7 @@ static void *host_rx_thread(void *arg) {
         conn_t *cn;
         const uint16_t udp_port = ntohs(udp->dst_port);
         if (!mtp_udp_port_in_range(udp_port)) continue;
+        const uint32_t group_id = mtp_port_to_group(udp_port);
         channel_id = mtp_port_to_channel(udp_port);
         subchannel_id = mtp_port_to_subchannel(udp_port);
         if (subchannel_id >= SUBCHANNEL_COUNT) continue;
@@ -437,7 +450,7 @@ static void *host_rx_thread(void *arg) {
                     (unsigned)hdrv.message_id, ntohl(ip->src_ip), ntohl(ip->dst_ip));
         }
         if (channel_id >= MAX_CHANNELS) continue;
-        ctx = find_channel(channel_id);
+        ctx = find_channel_group(group_id, channel_id);
         if (!ctx) continue;
         if (legacy_msg_type == ARBOR_MSG_END &&
             host_ack_tombstoned_end(channel_id, subchannel_id, hdrv.message_id,
@@ -475,6 +488,9 @@ static void *host_rx_thread(void *arg) {
             m->payload_offset = hdrv.offset_a;
             m->agg_depth = hdrv.agg_depth;
             m->aggregated = hdrv.aggregated ? 1u : 0u;
+            m->op = hdrv.op;
+            m->dtype = hdrv.dtype;
+            m->payload_kind = (uint8_t)hdrv.payload_kind;
             if (!hdrv.payload_valid && hdrv.packet_type == ARBOR_PKT_DATA_REQUEST) {
                 m->request_kind = ARBOR_REQ_AGGREGATE_CONTROL_ACK;
             } else if (hdrv.packet_type == ARBOR_PKT_DATA_REQUEST && hdrv.payload_valid) {
@@ -627,7 +643,7 @@ void start_host_rx(void) {
     g_host_rx_started = 1;
 }
 
-int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip) {
+int init_channel_group(uint32_t group_id, uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip) {
     if (g_channel_state_count >= MAX_CHANNELS) return -1;
     if (find_channel(channel_id)) return -1;
 
@@ -640,6 +656,7 @@ int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip) 
     memset(state, 0, sizeof(*state));
     ctx = &state->channel;
     ctx->active = 1;
+    ctx->group_id = group_id;
     ctx->channel_id = channel_id;
     ctx->uplink_conn = uplink_conn;
     ctx->recv_conn = recv_conn;
@@ -651,10 +668,15 @@ int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip) 
         subchannel_ctx_t *sc = &state->subchannels[s];
         memset(sc, 0, sizeof(*sc));
         sc->active = 1;
+        sc->group_id = group_id;
         sc->channel_id = channel_id;
         sc->subchannel_id = s;
-        sc->udp_port = mtp_udp_port(channel_id, s);
+        sc->udp_port = mtp_udp_port_group(group_id, channel_id, s);
         sc->iface_index = (int)s;
     }
     return 0;
+}
+
+int init_channel(uint32_t channel_id, uint32_t local_ip, uint32_t responder_ip) {
+    return init_channel_group(0, channel_id, local_ip, responder_ip);
 }

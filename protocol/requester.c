@@ -53,7 +53,10 @@ static uint64_t requester_register_gap_us(uint32_t channel_id) {
     if (total_requesters < 2) total_requesters = 2;
     interval_ns = ((uint64_t)total_requesters * (uint64_t)PAYLOAD_LEN * 8ULL * 1000000000ULL) /
                   ARBOR_TEST_LINE_RATE_BPS;
-    if (interval_ns < 100000000ULL) interval_ns = 100000000ULL;
+    /* The reference simulator can schedule sub-microsecond beacons, but a
+     * pcap/veth endpoint cannot.  Bound REGISTER traffic to a practical
+     * interval so retransmissions do not starve data and repair packets. */
+    if (interval_ns < 1000000000ULL) interval_ns = 1000000000ULL;
     return (interval_ns + 999ULL) / 1000ULL;
 }
 
@@ -171,7 +174,7 @@ static void send_register_frame(subchannel_ctx_t *sc, uint32_t src_ip, uint32_t 
 
 static void send_request_frame(subchannel_ctx_t *sc, uint32_t src_ip, uint32_t dst_ip,
                                uint8_t message_id, uint32_t start_sequence,
-                               const credit *c, const void *payload, uint16_t plen,
+                               const credit *c, const void *payload, uint16_t plen, uint8_t op,
                                requester_stats_t *stats) {
     uint8_t frame[HDR_LEN + PAYLOAD_LEN];
     const uint8_t msg_type = c->repair ? ARBOR_MSG_REPAIR_REQUEST : ARBOR_MSG_REQUEST;
@@ -216,15 +219,18 @@ static void send_request_frame(subchannel_ctx_t *sc, uint32_t src_ip, uint32_t d
     }
 
     const uint32_t wire_offset = arbor_protocol_sequence_add(start_sequence, c->credit_offset);
-    int len = build_frame_ex(frame, src_ip, dst_ip,
+    int len = build_frame_ex_meta(frame, src_ip, dst_ip,
                              msg_type, flags,
                              sc->channel_id, sc->subchannel_id,
                              0, wire_offset,
                              agg_depth, agg_stack, fanin,
-                             ARBOR_REQ_AGGREGATE_PAYLOAD, payload, plen);
+                             ARBOR_REQ_AGGREGATE_PAYLOAD, op, ARBOR_DTYPE_INT32,
+                             ARBOR_PAYLOAD_DATA,
+                             payload, plen);
     if (c->ecn_ce) {
         ip_header_t *ip = (ip_header_t *)(frame + sizeof(eth_header_t));
         ip->tos = (uint8_t)((ip->tos & ~ARBOR_IPV4_ECN_MASK) | ARBOR_IPV4_ECN_CE);
+        arbor_recompute_ip_checksum(ip);
     }
     arbor_store_message_id(frame + sizeof(eth_header_t) + sizeof(ip_header_t) + sizeof(udp_header_t), message_id);
     if (c->repair) { stats[sc->subchannel_id].repair_sent++; fprintf(stderr, "[repair-request-tx] ch=%u sub=%u offset=%u msg=%u\n", c->channel_id, c->subchannel_id, c->credit_offset, (unsigned)message_id); }
@@ -251,8 +257,10 @@ static void store_response_payload(uint32_t channel_id, uint32_t local_offset,
     host_channel_state_t *state = find_channel_state(channel_id);
     if (!state || !state->request_result_buf || payload_len == 0) return;
     if (local_offset >= state->request_result_npkts) return;
-    memcpy(state->request_result_buf + local_offset * PAYLOAD_LEN,
-           payload, payload_len > PAYLOAD_LEN ? PAYLOAD_LEN : payload_len);
+    uint16_t copy_len = payload_len > PAYLOAD_LEN ? PAYLOAD_LEN : payload_len;
+    uint16_t remaining = arbor_payload_len(state->request_result_bytes, local_offset);
+    if (copy_len > remaining) copy_len = remaining;
+    memcpy(state->request_result_buf + local_offset * PAYLOAD_LEN, payload, copy_len);
 }
 
 static int request_mode(uint32_t channel_id, const void *buf, uint32_t size,
@@ -266,7 +274,7 @@ static int request_mode(uint32_t channel_id, const void *buf, uint32_t size,
     const uint64_t register_gap_us = requester_register_gap_us(channel_id);
     if (!ctx || !state) return -1;
 
-    uint32_t total_npkts = size / PAYLOAD_LEN;
+    uint32_t total_npkts = arbor_packet_count(size);
     if (total_npkts == 0) return 0;
 
     const uint8_t *src = (const uint8_t *)buf;
@@ -478,7 +486,7 @@ static int request_mode(uint32_t channel_id, const void *buf, uint32_t size,
                 send_request_frame(sc, ctx->local_ip, ctx->responder_ip, msg->message_id,
                                    msg->start_sequence, &c,
                                    pull ? src + c.credit_offset * PAYLOAD_LEN : NULL,
-                                   pull ? PAYLOAD_LEN : 0, stats);
+                                   pull ? arbor_payload_len(size, c.credit_offset) : 0, op, stats);
                 if (st && st->occupied && st->offset == c.credit_offset && !c.repair) {
                     st->request_sent = 1;
                     st->normal_credit_pending = 0;

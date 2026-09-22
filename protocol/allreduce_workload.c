@@ -114,7 +114,7 @@ int lab_run_host_allreduce(const lab_config_t *config, const char *host_name,
     }
 
     nints = MSG_SIZE / sizeof(int32_t);
-    total_npkts = MSG_SIZE / PAYLOAD_LEN;
+    total_npkts = arbor_packet_count(MSG_SIZE);
     src = malloc(MSG_SIZE);
     dst = calloc(1, MSG_SIZE);
     if (!src || !dst) {

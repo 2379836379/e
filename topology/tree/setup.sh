@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+# Arbor data frames carry an 8192-byte payload.  Keep the emulated links
+# jumbo-capable so pcap injection does not silently reject the data packets.
+MTU=9000
+
 hosts=(host1 host2 host3 host4)
 routers=(router-root router-a router-a0 router-a1)
 nodes=("${routers[@]}" "${hosts[@]}")
@@ -59,6 +63,8 @@ setup() {
     sudo docker exec "$c2" ip link set "${v2}_tmp" name "$v2"
     sudo docker exec "$c1" ip link set "$v1" up
     sudo docker exec "$c2" ip link set "$v2" up
+    sudo docker exec "$c1" ip link set dev "$v1" mtu "$MTU"
+    sudo docker exec "$c2" ip link set dev "$v2" mtu "$MTU"
     sudo docker exec "$c1" ip link set dev "$v1" promisc on
     sudo docker exec "$c2" ip link set dev "$v2" promisc on
   done

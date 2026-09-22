@@ -12,7 +12,7 @@ CFG_PATH="topology/tree/ranks.cfg"
 HOSTS=(host1 host2 host3 host4)
 ROUTERS=(router-root router-a router-a0 router-a1)
 N=4
-NINTS=4096
+NINTS=32768
 
 cleanup() {
   set +e

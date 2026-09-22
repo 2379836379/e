@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT="$ROOT/tests/out"; DATA="$ROOT/tests/data/current"; BIN="$ROOT/build/inc_1star"
-HOSTS=(host1 host2 host3 host4); ROUTERS=(router1); CFG=topology/star1/ranks.cfg; N=4; NINTS=4096
+HOSTS=(host1 host2 host3 host4); ROUTERS=(router1); CFG=topology/star1/ranks.cfg; N=4; NINTS=32768
 cleanup(){ set +e; for c in "${ROUTERS[@]}" "${HOSTS[@]}"; do docker exec "$c" pkill -f /app/build/inc_1star >/dev/null 2>&1 || true; done; bash "$ROOT/topology/star1/setup.sh" clean >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 cd "$ROOT"; rm -rf "$OUT"; mkdir -p "$OUT" "$DATA" "$(dirname "$BIN")"

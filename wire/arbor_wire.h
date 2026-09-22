@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define PAYLOAD_LEN    1024
+#define PAYLOAD_LEN    8192
 #define ARBOR_IP_PROTO 0x12
 #define ETH_TYPE_IP    0x0800
 #define MTP_UDP_PORT_BASE 10000
@@ -27,7 +27,7 @@
 #define REPAIR_MAX_RETRIES 64U
 #define AGTR_ARRAY_SIZE (2 * WINDOW)
 
-#define OP_ALLREDUCE    2
+#define OP_ALLREDUCE    ARBOR_OP_SUM
 
 #define ARBOR_FLAG_ECN               0x01
 #define ARBOR_FLAG_VALID             0x02
@@ -329,6 +329,37 @@ int build_frame_ex(uint8_t *buf,
                    uint8_t agg_depth, const uint32_t *agg_stack,
                    const uint8_t *fanin_vec, uint8_t request_kind,
                    const void *payload, uint16_t plen);
+int build_frame_ex_meta(uint8_t *buf,
+                   uint32_t src_ip, uint32_t dst_ip,
+                   uint8_t msg_type, uint8_t flags,
+                   uint32_t channel_id, uint32_t subchannel_id,
+                   uint32_t credit_offset, uint32_t payload_offset,
+                   uint8_t agg_depth, const uint32_t *agg_stack, const uint8_t *fanin_vec, uint8_t request_kind,
+                   uint8_t op, uint8_t dtype, arbor_payload_kind_t payload_kind,
+                   const void *payload, uint16_t plen);
+static inline uint32_t arbor_packet_count(uint32_t bytes) {
+    return (bytes + PAYLOAD_LEN - 1U) / PAYLOAD_LEN;
+}
+static inline uint16_t arbor_payload_len(uint32_t bytes, uint32_t packet) {
+    uint32_t off = packet * PAYLOAD_LEN;
+    if (off >= bytes) return 0;
+    uint32_t rem = bytes - off;
+    return (uint16_t)(rem > PAYLOAD_LEN ? PAYLOAD_LEN : rem);
+}
+static inline uint16_t arbor_ip_checksum(const void *data, int len) {
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t sum = 0;
+    int i;
+    for (i = 0; i + 1 < len; i += 2) sum += (uint16_t)((p[i] << 8) | p[i + 1]);
+    if (len & 1) sum += (uint16_t)(p[len - 1] << 8);
+    while (sum >> 16) sum = (sum & 0xffffU) + (sum >> 16);
+    return (uint16_t)(~sum & 0xffffU);
+}
+static inline void arbor_recompute_ip_checksum(ip_header_t *ip) {
+    if (!ip) return;
+    ip->checksum = 0;
+    ip->checksum = htons(arbor_ip_checksum(ip, sizeof(*ip)));
+}
 arbor_router_action_t classify_router_request(uint8_t msg_type, uint8_t agg_depth,
                                               uint8_t request_kind, int slot_match,
                                               int slot_valid, uint32_t credit_offset,
@@ -345,6 +376,8 @@ int router_encode_aggregated_request_for_test(uint8_t *frame,
                                               uint8_t request_kind,
                                               const int32_t *payload_words);
 uint16_t mtp_udp_port(uint32_t channel_id, uint32_t subchannel_id);
+uint16_t mtp_udp_port_group(uint32_t group_id, uint32_t channel_id, uint32_t subchannel_id);
+uint32_t mtp_port_to_channel_key(uint16_t udp_port);
 int mtp_udp_port_in_range(uint16_t udp_port);
 uint32_t mtp_port_to_channel(uint16_t udp_port);
 uint32_t mtp_port_to_group(uint16_t udp_port);

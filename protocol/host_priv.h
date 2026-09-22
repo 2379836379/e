@@ -25,6 +25,7 @@ typedef struct {
 
 typedef struct {
     int active;
+    uint32_t group_id;
     uint32_t channel_id;
     uint32_t subchannel_id;
     uint16_t udp_port;
@@ -33,6 +34,7 @@ typedef struct {
 
 typedef struct {
     int active;
+    uint32_t group_id;
     uint32_t channel_id;
     int uplink_conn;
     int recv_conn;
@@ -74,9 +76,11 @@ typedef struct {
     channel_ctx_t channel;
     subchannel_ctx_t subchannels[SUBCHANNEL_COUNT];
     const uint8_t *local_src_buf;
+    uint32_t local_src_bytes;
     uint32_t local_src_npkts;
     uint8_t local_src_op;
     uint8_t *request_result_buf;
+    uint32_t request_result_bytes;
     uint32_t request_result_npkts;
     uint32_t request_next_sequence;
     protocol_message_t request_messages[MAX_ACTIVE_MESSAGES];
