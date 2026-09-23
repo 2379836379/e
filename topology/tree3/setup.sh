@@ -69,17 +69,21 @@ EOF
   for r in router-root router-l router-r router-ll router-lr router-rl router-rr; do
     for rank in {0..7}; do
       role=LEVEL
+      # parent_up is the local egress toward the root; parent_down is the
+      # local ingress from the root.  The veth names are directional pairs.
       case "$r:$rank" in
         router-root:0|router-root:1|router-root:2|router-root:3)
-          leaf_port=r0-l-down; parent_up=r0-l-up; parent_down=r0-l-down; role=LEVEL ;;
+          leaf_port=r0-l-down; parent_up=r0-l-down; parent_down=r0-l-up; role=LEVEL ;;
         router-root:*)
-          leaf_port=r0-r-down; parent_up=r0-r-up; parent_down=r0-r-down; role=LEVEL ;;
-        router-l:0|router-l:1) leaf_port=rl-ll-down; parent_up=rl-up; parent_down=rl-down ;;
-        router-l:2|router-l:3) leaf_port=rl-lr-down; parent_up=rl-up; parent_down=rl-down ;;
-        router-l:*) leaf_port=rl-up; parent_up=rl-up; parent_down=rl-down ;;
-        router-r:4|router-r:5) leaf_port=rr-rl-down; parent_up=rr-up; parent_down=rr-down ;;
-        router-r:6|router-r:7) leaf_port=rr-rr-down; parent_up=rr-up; parent_down=rr-down ;;
-        router-r:*) leaf_port=rr-up; parent_up=rr-up; parent_down=rr-down ;;
+          leaf_port=r0-r-down; parent_up=r0-r-down; parent_down=r0-r-up; role=LEVEL ;;
+        router-l:0|router-l:1) leaf_port=rl-ll-down; parent_up=rl-down; parent_down=rl-up ;;
+        router-l:2|router-l:3) leaf_port=rl-lr-down; parent_up=rl-down; parent_down=rl-up ;;
+        # Destinations in the opposite half go upward to root via rl-down.
+        router-l:*) leaf_port=rl-down; parent_up=rl-down; parent_down=rl-up ;;
+        router-r:4|router-r:5) leaf_port=rr-rl-down; parent_up=rr-down; parent_down=rr-up ;;
+        router-r:6|router-r:7) leaf_port=rr-rr-down; parent_up=rr-down; parent_down=rr-up ;;
+        # Destinations in the opposite half go upward to root via rr-down.
+        router-r:*) leaf_port=rr-down; parent_up=rr-down; parent_down=rr-up ;;
         router-ll:0) leaf_port=rll-h1s0; parent_up=rll-down; parent_down=rll-up ;;
         router-ll:1) leaf_port=rll-h2s0; parent_up=rll-down; parent_down=rll-up ;;
         router-ll:*) leaf_port=rll-down; parent_up=rll-down; parent_down=rll-up ;;
@@ -103,7 +107,9 @@ EOF
       done
       for sub in 0 1; do echo "tree,$r,$rank,$sub,$role,$parent_up,$parent_down" >> "$cfg"; done
       case "$r" in
-        router-root) for sub in 0 1; do echo "mcast,$r,$rank,$sub,r0-l-up" >> "$cfg"; echo "mcast,$r,$rank,$sub,r0-r-up" >> "$cfg"; done ;;
+        # Root sends down to the middle routers through the root-side
+        # downlink veths; the -up veths are ingress from those routers.
+        router-root) for sub in 0 1; do echo "mcast,$r,$rank,$sub,r0-l-down" >> "$cfg"; echo "mcast,$r,$rank,$sub,r0-r-down" >> "$cfg"; done ;;
         router-l) for sub in 0 1; do echo "mcast,$r,$rank,$sub,rl-ll-down" >> "$cfg"; echo "mcast,$r,$rank,$sub,rl-lr-down" >> "$cfg"; done ;;
         router-r) for sub in 0 1; do echo "mcast,$r,$rank,$sub,rr-rl-down" >> "$cfg"; echo "mcast,$r,$rank,$sub,rr-rr-down" >> "$cfg"; done ;;
         router-ll)

@@ -260,6 +260,7 @@ static void router_forward_bypass_tree(const uint8_t *frame, int len,
                                       const char *ingress_port, uint32_t subchannel_id,
                                       uint32_t dst_ip) {
     int responder_rank;
+    const char *parent_up_port;
     const char *out_port;
 
     if (!g_router_topology) return;
@@ -271,10 +272,54 @@ static void router_forward_bypass_tree(const uint8_t *frame, int len,
         return;
     }
 
+    /* Requests and repair/AGG_MISS packets arriving from a child first travel
+     * to the root.  Only a packet that is already on the parent/downstream leg
+     * may be routed by destination.  This mirrors the reference switch's
+     * inPort != parentPort rule. */
+    parent_up_port = router_tree_parent_up_port(g_router_topology, responder_rank,
+                                                subchannel_id);
+    if (parent_up_port &&
+        !router_ingress_from_parent(g_router_topology, responder_rank,
+                                    subchannel_id, ingress_port)) {
+        inject_on_port(parent_up_port, frame, len, responder_rank, subchannel_id);
+        return;
+    }
+
     out_port = ArborRouterNodeRoutePort(g_router_topology, responder_rank, subchannel_id);
     if (!out_port) return;
 
     inject_on_port(out_port, frame, len, responder_rank, subchannel_id);
+}
+
+/* Normal request output: an unconsumed stack means another aggregation level
+ * remains, so the packet must continue toward the root. */
+static void router_forward_request_tree(const uint8_t *frame, int len,
+                                        const char *ingress_port,
+                                        uint32_t subchannel_id, uint32_t dst_ip,
+                                        uint8_t agg_depth) {
+    int responder_rank;
+    const char *parent_up_port;
+
+    if (!g_router_topology || agg_depth == 0) {
+        router_forward_bypass_tree(frame, len, ingress_port, subchannel_id, dst_ip);
+        return;
+    }
+    responder_rank = rank_of_ip(dst_ip);
+    if (responder_rank < 0) {
+        router_forward_bypass_tree(frame, len, ingress_port, subchannel_id, dst_ip);
+        return;
+    }
+    parent_up_port = router_tree_parent_up_port(g_router_topology, responder_rank,
+                                                subchannel_id);
+    if (parent_up_port &&
+        !router_ingress_from_parent(g_router_topology, responder_rank,
+                                    subchannel_id, ingress_port)) {
+        inject_on_port(parent_up_port, frame, len, responder_rank, subchannel_id);
+        return;
+    }
+    /* A malformed/configuration-specific packet already on the parent leg is
+     * allowed to fall through to the normal destination route. */
+    router_forward_bypass_tree(frame, len, ingress_port, subchannel_id, dst_ip);
 }
 
 /* Down-tree fanout for responder-originated control packets. */
@@ -847,9 +892,10 @@ void INC(void) {
             if (level_fanin == 1) {
                 request_pop_one_level(arbor_hdr);
                 g_router_request_bypass++;
-                router_forward_bypass_tree(pk.data, pk.len,
-                                           pk.device ? pk.device->name : NULL,
-                                           subchannel_id, ip->dst_ip);
+                router_forward_request_tree(pk.data, pk.len,
+                                            pk.device ? pk.device->name : NULL,
+                                            subchannel_id, ip->dst_ip,
+                                            arbor_get_agg_depth(arbor_load_ctrl(arbor_hdr)));
                 continue;
             }
         }
@@ -929,7 +975,16 @@ void INC(void) {
                         out_hdr.aggregated ? 1u : 0u, out_hdr.offset_a, out_hdr.offset_b,
                         out_hdr.payload_valid ? 1u : 0u, slot->payload_len, rank_of_ip(ip->dst_ip));
             }
-            router_forward(slot->master_frame, (int)slot->master_len, ip->dst_ip, subchannel_id);
+            {
+                arbor_header_view_t out_hdr = arbor_parse_header(
+                    slot->master_frame + sizeof(eth_header_t) + sizeof(ip_header_t) +
+                    sizeof(udp_header_t));
+                router_forward_request_tree(slot->master_frame,
+                                            (int)slot->master_len,
+                                            pk.device ? pk.device->name : NULL,
+                                            subchannel_id, ip->dst_ip,
+                                            out_hdr.agg_depth);
+            }
         }
     }
 }

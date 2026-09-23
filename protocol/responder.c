@@ -461,8 +461,12 @@ static void refresh_register_ack_pending(protocol_message_t *meta, uint32_t expe
     if (!meta || !meta->in_use) return;
     for (uint32_t s = 0; s < SUBCHANNEL_COUNT; ++s) {
         const uint8_t sub_bit = (uint8_t)(1u << s);
-        if ((meta->registered_acknowledged_mask & sub_bit) != 0) continue;
         if ((meta->registered_bitmap[s] & expected_requesters) != expected_requesters) continue;
+        /* REGISTER is a beacon and may be retransmitted after its ACK is
+         * lost.  Match the reference semantics: once the bitmap is full,
+         * every repeated REGISTER re-opens an idempotent REGISTER_ACK.
+         * Do not suppress this solely because an earlier ACK/credit was
+         * emitted for the same epoch. */
         meta->register_ack_pending |= sub_bit;
     }
 }
@@ -486,7 +490,6 @@ static void flush_register_acks(uint32_t channel_id,
                                   register_epoch ? register_epoch[s] : meta->epoch);
             meta->registered_acknowledged_mask |= sub_bit;
             meta->register_ack_pending &= (uint8_t)~sub_bit;
-            refresh_register_ack_pending(meta, neighbor_mask_of(channel_id));
         }
     }
 }
@@ -854,8 +857,11 @@ static int message_subchannel_ready(const protocol_message_t *meta, uint32_t sub
 
 static void note_registration_credit_sent(protocol_message_t *meta, uint32_t subchannel_id) {
     if (!meta || subchannel_id >= SUBCHANNEL_COUNT) return;
+    /* A first credit also confirms readiness at the requester, but it does
+     * not replace REGISTER_ACK.  Keep an ACK scheduled until it is actually
+     * transmitted so that losing both the credit and the ACK is recoverable
+     * when the next REGISTER beacon arrives. */
     meta->registered_acknowledged_mask |= (uint8_t)(1u << subchannel_id);
-    meta->register_ack_pending &= (uint8_t)~(1u << subchannel_id);
 }
 
 static int response_message_done(const protocol_message_t *meta) {
